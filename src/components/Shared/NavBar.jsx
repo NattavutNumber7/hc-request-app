@@ -1,0 +1,131 @@
+import { useState } from 'react'
+import { signOut } from 'firebase/auth'
+import { useNavigate, useLocation } from 'react-router-dom'
+import { auth } from '../../services/firebase'
+import {
+  LogOut, LayoutDashboard, FilePlus, List,
+  Briefcase, FolderOpen, ClipboardList, ScrollText, ChevronDown,
+  Moon, Sun
+} from 'lucide-react'
+
+const MANAGER_NAV = [
+  { path: '/request',     label: 'ยื่นคำขอ',    icon: FilePlus },
+  { path: '/my-requests', label: 'คำขอของฉัน',  icon: ClipboardList },
+  { path: '/jd-files',    label: 'JD Files',     icon: FolderOpen },
+]
+const TA_NAV = [
+  { path: '/dashboard',    label: 'Dashboard',    icon: LayoutDashboard },
+  { path: '/all-requests', label: 'All Requests', icon: List },
+  { path: '/my-cases',     label: 'My Cases',     icon: Briefcase },
+  { path: '/request',      label: 'ยื่นคำขอ',    icon: FilePlus },
+  { path: '/audit-log',    label: 'Audit Log',    icon: ScrollText },
+]
+const ADMIN_NAV = TA_NAV
+
+const ROLE_LABEL = {
+  admin:   'Administrator',
+  ta:      'TA / People Experience',
+  manager: 'Manager',
+}
+
+export default function NavBar({ user, role, isDarkMode, toggleDarkMode }) {
+  const navigate = useNavigate()
+  const { pathname } = useLocation()
+  const [menuOpen, setMenuOpen] = useState(false)
+
+  async function handleSignOut() {
+    try { await signOut(auth) } catch (e) { console.error(e) }
+  }
+
+  const navItems = role === 'admin' ? ADMIN_NAV : role === 'ta' ? TA_NAV : MANAGER_NAV
+
+  return (
+    <nav className="bg-white dark:bg-slate-900 border-b border-gray-100 dark:border-slate-800 px-5 h-14 flex items-center justify-between sticky top-0 z-40 shadow-sm transition-colors">
+
+      {/* Brand */}
+      <div className="flex items-center gap-2.5 shrink-0">
+        <div
+          className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0"
+          style={{ background: 'linear-gradient(135deg, #008065, #00ce7c)' }}
+        >
+          <span className="text-white text-xs font-bold tracking-tight">HC</span>
+        </div>
+        <div className="leading-tight hidden sm:block">
+          <p className="text-sm font-bold text-gray-800 dark:text-gray-100">HC Request</p>
+          <p className="text-xs text-gray-400 dark:text-slate-500 font-medium">People Experience · Freshket</p>
+        </div>
+      </div>
+
+      {/* Nav */}
+      <div className="flex items-center gap-0.5">
+        {navItems.map(({ path, label, icon: Icon }) => {
+          const active = pathname === path
+          return (
+            <button
+              key={path}
+              onClick={() => navigate(path)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${
+                active 
+                  ? 'bg-[#008065] text-white shadow-md shadow-[#008065]/20' 
+                  : 'text-gray-500 dark:text-slate-400 hover:bg-gray-100 dark:hover:bg-slate-800 hover:text-gray-900 dark:hover:text-gray-200'
+              }`}
+            >
+              <Icon size={14} />
+              <span className="hidden md:block">{label}</span>
+            </button>
+          )
+        })}
+      </div>
+
+      {/* Actions */}
+      <div className="flex items-center gap-2">
+        <button
+          onClick={toggleDarkMode}
+          className="p-2 rounded-xl text-gray-400 hover:bg-gray-100 dark:hover:bg-slate-800 transition-colors"
+          title={isDarkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+        >
+          {isDarkMode ? <Sun size={18} className="text-yellow-400" /> : <Moon size={18} />}
+        </button>
+
+        <div className="relative shrink-0">
+          <button
+            onClick={() => setMenuOpen(v => !v)}
+            className="flex items-center gap-2 px-2 py-1.5 rounded-xl hover:bg-gray-50 dark:hover:bg-slate-800 transition-colors"
+          >
+            {user.photoURL
+              ? <img src={user.photoURL} alt="" className="w-7 h-7 rounded-full ring-2 ring-offset-1" style={{ '--tw-ring-color': '#00ce7c' }} referrerPolicy="no-referrer" />
+              : <div className="w-7 h-7 rounded-full flex items-center justify-center text-white text-xs font-bold" style={{ background: '#008065' }}>{user.displayName?.[0]}</div>
+            }
+            <div className="hidden md:flex flex-col items-start leading-tight">
+              <span className="text-sm font-semibold text-gray-800 dark:text-gray-100">{user.displayName?.split(' ')[0]}</span>
+              <span className="text-xs text-gray-400 dark:text-slate-500 font-medium">{ROLE_LABEL[role]}</span>
+            </div>
+            <ChevronDown size={13} className="text-gray-400 hidden md:block" />
+          </button>
+
+          {menuOpen && (
+            <>
+              <div className="fixed inset-0 z-40" onClick={() => setMenuOpen(false)} />
+              <div className="absolute right-0 top-full mt-2 w-56 bg-white dark:bg-slate-900 rounded-xl border border-gray-100 dark:border-slate-800 shadow-xl z-50 overflow-hidden">
+                <div className="px-4 py-3 border-b border-gray-50 dark:border-slate-800">
+                  <p className="text-sm font-semibold text-gray-800 dark:text-gray-100">{user.displayName}</p>
+                  <p className="text-xs text-gray-400 dark:text-slate-500 truncate">{user.email}</p>
+                  <span className="inline-block mt-1.5 text-xs px-2 py-0.5 rounded-full text-white" style={{ background: '#008065' }}>
+                    {ROLE_LABEL[role]}
+                  </span>
+                </div>
+                <button
+                  onClick={handleSignOut}
+                  className="w-full flex items-center gap-2 px-4 py-3 text-sm text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors"
+                >
+                  <LogOut size={14} />
+                  ออกจากระบบ
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </nav>
+  )
+}

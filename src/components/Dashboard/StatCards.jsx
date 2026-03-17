@@ -1,0 +1,60 @@
+import { Inbox, UserCheck, CheckCircle, Clock } from 'lucide-react'
+
+const STAT_CONFIG = [
+  {
+    key: 'open',
+    label: 'Open',
+    labelTh: 'รออนุมัติ',
+    icon: Inbox,
+    color: 'text-yellow-600 dark:text-yellow-500',
+    bg: 'bg-yellow-50 dark:bg-yellow-500/10',
+    border: 'border-yellow-200 dark:border-yellow-500/20',
+  },
+  {
+    key: 'assigned',
+    label: 'In Progress',
+    labelTh: 'กำลังดำเนินการ',
+    icon: UserCheck,
+    color: 'text-blue-600 dark:text-blue-500',
+    bg: 'bg-blue-50 dark:bg-blue-500/10',
+    border: 'border-blue-200 dark:border-blue-500/20',
+  },
+  {
+    key: 'closed',
+    label: 'Closed',
+    labelTh: 'เสร็จสิ้น',
+    icon: CheckCircle,
+    color: 'text-green-600 dark:text-green-500',
+    bg: 'bg-green-50 dark:bg-green-500/10',
+    border: 'border-green-200 dark:border-green-500/20',
+  },
+  {
+    key: 'total',
+    label: 'Total',
+    labelTh: 'ทั้งหมด',
+    icon: Clock,
+    color: 'text-slate-600 dark:text-slate-400',
+    bg: 'bg-slate-50 dark:bg-slate-800/50',
+    border: 'border-slate-200 dark:border-slate-800',
+  },
+]
+
+export default function StatCards({ stats }) {
+  return (
+    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      {STAT_CONFIG.map(({ key, label, labelTh, icon: Icon, color, bg, border }) => (
+        <div
+          key={key}
+          className={`rounded-xl border ${border} ${bg} p-5 flex flex-col gap-2 transition-colors`}
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-sm text-slate-500 dark:text-slate-400 font-medium">{label}</span>
+            <Icon size={18} className={color} />
+          </div>
+          <p className={`text-4xl font-black tracking-tight ${color}`}>{stats[key] ?? 0}</p>
+          <p className="text-xs text-slate-400 dark:text-slate-500 uppercase font-semibold tracking-wider font-mono">{labelTh}</p>
+        </div>
+      ))}
+    </div>
+  )
+}
