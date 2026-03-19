@@ -42,17 +42,17 @@ const STAT_CONFIG = [
 export default function StatCards({ stats }) {
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-      {STAT_CONFIG.map(({ key, label, labelTh, icon: Icon, color, bg, border }) => (
+      {STAT_CONFIG.map((card) => (
         <div
-          key={key}
-          className={`rounded-xl border ${border} ${bg} p-5 flex flex-col gap-2 transition-colors`}
+          key={card.key}
+          className={`rounded-xl border ${card.border} ${card.bg} p-5 flex flex-col gap-2 transition-colors`}
         >
           <div className="flex items-center justify-between">
-            <span className="text-sm text-slate-500 dark:text-slate-400 font-medium">{label}</span>
-            <Icon size={18} className={color} />
+            <span className="text-sm text-slate-500 dark:text-slate-400 font-medium">{card.label}</span>
+            <card.icon size={18} className={card.color} />
           </div>
-          <p className={`text-4xl font-black tracking-tight ${color}`}>{stats[key] ?? 0}</p>
-          <p className="text-xs text-slate-400 dark:text-slate-500 uppercase font-semibold tracking-wider font-mono">{labelTh}</p>
+          <p className={`text-4xl font-black tracking-tight ${card.color}`}>{stats[card.key] ?? 0}</p>
+          <p className="text-xs text-slate-400 dark:text-slate-500 uppercase font-semibold tracking-wider font-mono">{card.labelTh}</p>
         </div>
       ))}
     </div>

@@ -1,16 +1,17 @@
 import { useState, useEffect, useRef } from 'react'
-import { collection, addDoc, serverTimestamp } from 'firebase/firestore'
+import { collection, addDoc, updateDoc, doc, serverTimestamp, getDocs, query, where } from 'firebase/firestore'
 import { db } from '../../services/firebase'
 import { sendToWebhook } from '../../services/webhook'
 import { logAudit } from '../../services/auditLog'
-import { uploadJDFile } from '../../services/supabase'
-import { Loader2, CheckCircle, ChevronDown, X, Paperclip, FileText } from 'lucide-react'
-import { HQ_JG_LEVELS } from '../../data/jobGrades'
+import { uploadJDFile, getJDSignedUrl } from '../../services/supabase'
+import { Loader2, CheckCircle, ChevronDown, X, Paperclip, FileText, ExternalLink } from 'lucide-react'
+import { HQ_JG_LEVELS, OPERATION_JG_LEVELS } from '../../data/jobGrades'
 import { fetchSheetsData, getDepartmentByEmail, getEmployeesByDepartment, getPositionsByDepartment } from '../../services/sheetsData'
 
 const INITIAL_FORM = {
   requestType: 'New HC',
   position: '',
+  orgTrack: '',
   jg: '',
   department: '',
   headcount: 1,
@@ -18,7 +19,37 @@ const INITIAL_FORM = {
   reason: '',
   targetStartDate: '',
   replacementFor: '',
-  driveLink: '',
+}
+
+const OPERATION_ONLY_DEPARTMENT_PREFIXES = ['Processing Center', 'Distribution Center']
+const HYBRID_DEPARTMENT_PREFIXES = ['Supply Chain & Operation Strategy']
+
+function matchesDepartmentPrefix(department, prefixes) {
+  return prefixes.some((prefix) => department.startsWith(prefix))
+}
+
+function getTrackConfigByDepartment(department) {
+  if (!department) {
+    return { options: [], defaultTrack: '', locked: true }
+  }
+
+  if (matchesDepartmentPrefix(department, OPERATION_ONLY_DEPARTMENT_PREFIXES)) {
+    return { options: ['OPERATION'], defaultTrack: 'OPERATION', locked: true }
+  }
+
+  if (matchesDepartmentPrefix(department, HYBRID_DEPARTMENT_PREFIXES)) {
+    return { options: ['HQ', 'OPERATION'], defaultTrack: '', locked: false }
+  }
+
+  return { options: ['HQ'], defaultTrack: 'HQ', locked: true }
+}
+
+function normalizeText(value) {
+  return (value || '').trim().toLowerCase()
+}
+
+function getTimestampMs(ts) {
+  return ts?.toDate?.()?.getTime?.() ?? 0
 }
 
 // Combobox: dropdown + พิมพ์เองได้
@@ -107,6 +138,7 @@ function PositionCombobox({ value, onChange, positions, required }) {
 }
 
 export default function HCRequestForm({ user, role }) {
+  const feedbackTopRef = useRef(null)
   const [form, setForm] = useState(INITIAL_FORM)
   const [loading, setLoading] = useState(false)
   const [success, setSuccess] = useState(false)
@@ -117,6 +149,11 @@ export default function HCRequestForm({ user, role }) {
   const [allDepts, setAllDepts] = useState([])
   const [jdFile, setJdFile] = useState(null)
   const [uploadProgress, setUploadProgress] = useState('')
+  const [customPositions, setCustomPositions] = useState([])
+  const [existingJD, setExistingJD] = useState(null)
+  const [checkingJD, setCheckingJD] = useState(false)
+  const [openingJD, setOpeningJD] = useState(false)
+  const [previewUrl, setPreviewUrl] = useState(null)   // URL สำหรับ inline PDF viewer
 
   // โหลด positions, employees และ auto-fill department จาก Google Sheets
   useEffect(() => {
@@ -129,14 +166,98 @@ export default function HCRequestForm({ user, role }) {
 
       const dept = getDepartmentByEmail(managers, user.email)
       if (dept) {
-        setForm((prev) => ({ ...prev, department: dept }))
+        const cfg = getTrackConfigByDepartment(dept)
+        setForm((prev) => ({ ...prev, department: dept, orgTrack: cfg.defaultTrack }))
         setDeptAutoFilled(true)
       }
     })
   }, [user.email])
 
+  useEffect(() => {
+    if (!form.department) {
+      setCustomPositions([])
+      return
+    }
+
+    let cancelled = false
+    async function loadCustomPositions() {
+      try {
+        const q = query(collection(db, 'custom_positions'), where('department', '==', form.department))
+        const snap = await getDocs(q)
+        if (cancelled) return
+        setCustomPositions(snap.docs.map((d) => ({ id: d.id, ...d.data() })))
+      } catch (e) {
+        console.error('Error loading custom positions:', e)
+      }
+    }
+
+    loadCustomPositions()
+    return () => { cancelled = true }
+  }, [form.department])
+
+  useEffect(() => {
+    if (!form.position || !form.department) {
+      setExistingJD(null)
+      return
+    }
+
+    let cancelled = false
+    async function loadExistingJD() {
+      setCheckingJD(true)
+      try {
+        const q = query(collection(db, 'hc_requests'), where('position', '==', form.position))
+        const snap = await getDocs(q)
+        if (cancelled) return
+
+        const matched = snap.docs
+          .map((d) => ({ id: d.id, ...d.data() }))
+          .filter((r) =>
+            r.jdFilePath &&
+            r.department === form.department &&
+            (!form.orgTrack || !r.orgTrack || r.orgTrack === form.orgTrack)
+          )
+          .sort((a, b) => getTimestampMs(b.createdAt) - getTimestampMs(a.createdAt))[0] ?? null
+
+        setExistingJD(matched)
+      } catch (e) {
+        console.error('Error loading existing JD:', e)
+        setExistingJD(null)
+      } finally {
+        if (!cancelled) setCheckingJD(false)
+      }
+    }
+
+    loadExistingJD()
+    return () => { cancelled = true }
+  }, [form.position, form.department, form.orgTrack])
+
+  useEffect(() => {
+    if (!success && !error) return
+    feedbackTopRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }, [success, error])
+
+  async function handleOpenExistingJD() {
+    if (!existingJD?.jdFilePath) return
+    setOpeningJD(true)
+    try {
+      const url = await getJDSignedUrl(existingJD.jdFilePath)
+      if (url) setPreviewUrl(url)
+    } finally {
+      setOpeningJD(false)
+    }
+  }
+
   function handleChange(e) {
     const { name, value } = e.target
+    if (name === 'department') {
+      const cfg = getTrackConfigByDepartment(value)
+      setForm((prev) => ({ ...prev, department: value, orgTrack: cfg.defaultTrack, jg: '' }))
+      return
+    }
+    if (name === 'orgTrack') {
+      setForm((prev) => ({ ...prev, orgTrack: value, jg: '' }))
+      return
+    }
     setForm((prev) => ({ ...prev, [name]: value }))
   }
 
@@ -155,26 +276,41 @@ export default function HCRequestForm({ user, role }) {
         createdAt: serverTimestamp(),
       }
 
-      // อัพโหลดไฟล์ JD ก่อน (ถ้ามี)
-      let jdFileUrl  = null
-      let jdFilePath = null
-      let jdFileName = null
+      // สร้าง Firestore doc ก่อน เพื่อใช้ docRef.id เป็นชื่อ folder ใน Supabase
+      const docRef = await addDoc(collection(db, 'hc_requests'), payload)
+
+      // อัพโหลดไฟล์ JD หลังสร้าง doc (ใช้ docRef.id เป็น folder)
       if (jdFile) {
         setUploadProgress('กำลังอัพโหลดไฟล์ JD...')
-        const tmpId = `tmp_${Date.now()}`
-        const { url, path, error: uploadErr } = await uploadJDFile(jdFile, tmpId)
+        const { url, path, error: uploadErr } = await uploadJDFile(jdFile, docRef.id)
         if (uploadErr) throw new Error('อัพโหลดไฟล์ไม่สำเร็จ: ' + uploadErr)
-        jdFileUrl  = url
-        jdFilePath = path
-        jdFileName = jdFile.name
+        await updateDoc(doc(db, 'hc_requests', docRef.id), {
+          jdFileUrl:  url,
+          jdFilePath: path,
+          jdFileName: jdFile.name,
+        })
         setUploadProgress('')
       }
 
-      if (jdFileUrl)  payload.jdFileUrl  = jdFileUrl
-      if (jdFilePath) payload.jdFilePath = jdFilePath
-      if (jdFileName) payload.jdFileName = jdFileName
+      const normalizedPosition = normalizeText(payload.position)
+      const knownFromSheet = getPositionsByDepartment(positionsByDept, payload.department)
+        .some((p) => normalizeText(p) === normalizedPosition)
+      const knownFromCustom = customPositions
+        .some((p) => normalizeText(p.position) === normalizedPosition && (p.orgTrack || '') === (payload.orgTrack || ''))
 
-      const docRef = await addDoc(collection(db, 'hc_requests'), payload)
+      if (!knownFromSheet && !knownFromCustom && normalizedPosition) {
+        const customDoc = {
+          department: payload.department,
+          orgTrack: payload.orgTrack || '',
+          position: payload.position.trim(),
+          normalizedPosition,
+          createdBy: user.email,
+          createdAt: serverTimestamp(),
+        }
+        await addDoc(collection(db, 'custom_positions'), customDoc)
+        setCustomPositions((prev) => [...prev, customDoc])
+      }
+
       await sendToWebhook({ ...payload, id: docRef.id, createdAt: new Date().toISOString() })
       logAudit({
         requestId:  docRef.id,
@@ -187,7 +323,7 @@ export default function HCRequestForm({ user, role }) {
       })
 
       setSuccess(true)
-      setForm((prev) => ({ ...INITIAL_FORM, department: prev.department })) // คง department ไว้
+      setForm((prev) => ({ ...INITIAL_FORM, department: prev.department, orgTrack: prev.orgTrack })) // คง department/track ไว้
       setTimeout(() => setSuccess(false), 4000)
     } catch (err) {
       console.error('Submit error:', err)
@@ -197,10 +333,23 @@ export default function HCRequestForm({ user, role }) {
     }
   }
 
+  const trackConfig = getTrackConfigByDepartment(form.department)
+  const jgLevels = form.orgTrack === 'OPERATION' ? OPERATION_JG_LEVELS : HQ_JG_LEVELS
+  const customPositionOptions = customPositions
+    .filter((p) => !p.orgTrack || !form.orgTrack || p.orgTrack === form.orgTrack)
+    .map((p) => p.position)
+  const positionOptions = [...new Set([
+    ...getPositionsByDepartment(positionsByDept, form.department),
+    ...customPositionOptions,
+  ])].sort((a, b) => a.localeCompare(b))
+
   return (
-    <div className="max-w-2xl mx-auto">
-      <div className="bg-white dark:bg-slate-900 rounded-3xl border border-gray-200 dark:border-slate-800 p-8 shadow-xl shadow-emerald-900/5 transition-all">
-        <h2 className="text-2xl font-black text-gray-800 dark:text-gray-100 italic tracking-tight mb-8">ยื่นคำขออัตรากำลัง (HC Request)</h2>
+    <>
+    <div className="max-w-7xl mx-auto flex gap-5 items-start">
+      {/* ── Main Form Card ── */}
+      <div className="flex-1 min-w-0">
+      <div ref={feedbackTopRef} className="bg-white dark:bg-slate-900 rounded-3xl border border-gray-200 dark:border-slate-800 p-8 shadow-xl shadow-emerald-900/5 transition-all">
+        <h2 className="text-xl font-bold text-gray-800 dark:text-gray-100 italic tracking-tight mb-8">ยื่นคำขออัตรากำลัง (HC Request)</h2>
 
         {success && (
           <div className="flex items-center gap-3 bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-200 dark:border-emerald-500/20 text-emerald-700 dark:text-emerald-400 rounded-2xl px-5 py-4 mb-8 shadow-sm transition-all animate-in fade-in slide-in-from-top-4">
@@ -236,32 +385,61 @@ export default function HCRequestForm({ user, role }) {
             </div>
           </div>
 
-          {/* ตำแหน่ง + JG */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-            <div>
-              <label className="block text-[10px] uppercase font-black text-gray-500 dark:text-slate-500 tracking-widest ml-1 mb-2">ตำแหน่งที่ต้องการ *</label>
+          {/* ตำแหน่ง + Track + JG */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            {/* ตำแหน่ง */}
+            <div className="flex flex-col gap-1.5">
+              <label className="text-[10px] uppercase font-black text-gray-500 dark:text-slate-500 tracking-widest ml-1">ตำแหน่งที่ต้องการ *</label>
               <PositionCombobox
                 value={form.position}
                 onChange={(val) => setForm((prev) => ({ ...prev, position: val }))}
-                positions={getPositionsByDepartment(positionsByDept, form.department)}
+                positions={positionOptions}
                 required
               />
-              {form.department && getPositionsByDepartment(positionsByDept, form.department).length === 0 && (
-                <p className="text-[10px] font-bold text-gray-400 ml-1 mt-1.5 uppercase italic">กำลังโหลดรายชื่อ...</p>
+              {form.department && positionOptions.length === 0 && (
+                <p className="text-[10px] font-bold text-gray-400 ml-1 uppercase italic">กำลังโหลด...</p>
               )}
             </div>
 
-            <div>
-              <label className="block text-[10px] uppercase font-black text-gray-500 dark:text-slate-500 tracking-widest ml-1 mb-2">Job Grade (JG) *</label>
+            {/* Track */}
+            <div className="flex flex-col gap-1.5">
+              <label className="text-[10px] uppercase font-black text-gray-500 dark:text-slate-500 tracking-widest ml-1">Track *</label>
+              {trackConfig.locked ? (
+                <input
+                  type="text"
+                  value={trackConfig.defaultTrack || '—'}
+                  readOnly
+                  className="w-full border border-gray-200 dark:border-slate-800 rounded-xl px-4 py-2.5 text-sm bg-gray-50/50 dark:bg-slate-950/20 text-gray-500 dark:text-slate-400 cursor-not-allowed font-bold"
+                />
+              ) : (
+                <select
+                  name="orgTrack"
+                  value={form.orgTrack}
+                  onChange={handleChange}
+                  required
+                  className="w-full border border-gray-300 dark:border-slate-800 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 bg-white dark:bg-slate-900 dark:text-gray-100 transition-all font-bold"
+                >
+                  <option value="">เลือก Track</option>
+                  {trackConfig.options.map((opt) => (
+                    <option key={opt} value={opt}>{opt}</option>
+                  ))}
+                </select>
+              )}
+            </div>
+
+            {/* Job Grade */}
+            <div className="flex flex-col gap-1.5">
+              <label className="text-[10px] uppercase font-black text-gray-500 dark:text-slate-500 tracking-widest ml-1">Job Grade *</label>
               <select
                 name="jg"
                 value={form.jg}
                 onChange={handleChange}
                 required
-                className="w-full border border-gray-300 dark:border-slate-800 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 bg-white dark:bg-slate-900 dark:text-gray-100 transition-all font-bold"
+                disabled={!form.orgTrack}
+                className="w-full border border-gray-300 dark:border-slate-800 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 bg-white dark:bg-slate-900 dark:text-gray-100 transition-all font-bold disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                <option value="">เลือก JG</option>
-                {HQ_JG_LEVELS.map(({ value, label }) => (
+                <option value="">{form.orgTrack ? 'เลือก JG' : 'เลือก Track ก่อน'}</option>
+                {jgLevels.map(({ value, label }) => (
                   <option key={value} value={value}>{label}</option>
                 ))}
               </select>
@@ -299,32 +477,19 @@ export default function HCRequestForm({ user, role }) {
             )}
           </div>
 
-          {/* จำนวน HC + วันที่เริ่มงาน (เฉพาะ New HC) */}
+          {/* จำนวน HC (เฉพาะ New HC) */}
           {form.requestType === 'New HC' ? (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-              <div>
-                <label className="block text-[10px] uppercase font-black text-gray-500 dark:text-slate-500 tracking-widest ml-1 mb-2">จำนวนที่ต้องการ (HC) *</label>
-                <input
-                  type="number"
-                  name="headcount"
-                  value={form.headcount}
-                  onChange={handleChange}
-                  min={1}
-                  required
-                  className="w-full border border-gray-300 dark:border-slate-800 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 bg-white dark:bg-slate-900 dark:text-gray-100 transition-all font-bold tabular-nums"
-                />
-              </div>
-              <div>
-                <label className="block text-[10px] uppercase font-black text-gray-500 dark:text-slate-500 tracking-widest ml-1 mb-2">วันที่ต้องการรับคนเข้า *</label>
-                <input
-                  type="date"
-                  name="targetStartDate"
-                  value={form.targetStartDate}
-                  onChange={handleChange}
-                  required
-                  className="w-full border border-gray-300 dark:border-slate-800 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 bg-white dark:bg-slate-900 dark:text-gray-100 transition-all font-bold"
-                />
-              </div>
+            <div>
+              <label className="block text-[10px] uppercase font-black text-gray-500 dark:text-slate-500 tracking-widest ml-1 mb-2">จำนวนที่ต้องการ (HC) *</label>
+              <input
+                type="number"
+                name="headcount"
+                value={form.headcount}
+                onChange={handleChange}
+                min={1}
+                required
+                className="w-full border border-gray-300 dark:border-slate-800 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 bg-white dark:bg-slate-900 dark:text-gray-100 transition-all font-bold tabular-nums"
+              />
             </div>
           ) : null}
 
@@ -379,12 +544,11 @@ export default function HCRequestForm({ user, role }) {
 
           {/* Requirements */}
           <div>
-            <label className="block text-[10px] uppercase font-black text-gray-500 dark:text-slate-500 tracking-widest ml-1 mb-2">JD Requirement *</label>
+            <label className="block text-sm uppercase font-black text-gray-400 dark:text-slate-500 tracking-wider ml-1 mb-2">Requirement (Optional)</label>
             <textarea
               name="requirements"
               value={form.requirements}
               onChange={handleChange}
-              required
               rows={4}
               placeholder={`เช่น\n- ประสบการณ์ 3+ ปี ในสายงานตรง\n- ทักษะการสื่อสารดีเยี่ยม\n- ตรงต่อเวลาและรับผิดชอบสูง`}
               className="w-full border border-gray-300 dark:border-slate-800 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 bg-white dark:bg-slate-900 dark:text-gray-100 transition-all font-medium resize-none shadow-sm"
@@ -460,6 +624,83 @@ export default function HCRequestForm({ user, role }) {
           </button>
         </form>
       </div>
+      </div>{/* end flex-1 */}
+
+      {/* ── JD Preview Sidebar ── */}
+      {existingJD && (
+        <div className="hidden lg:flex w-[460px] shrink-0 flex-col sticky top-6 animate-in fade-in slide-in-from-right-4 duration-300">
+          <div className="rounded-3xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50/60 dark:bg-emerald-950/20 overflow-hidden shadow-sm flex flex-col">
+
+            {/* Header row */}
+            <div className="flex items-center justify-between px-4 py-3 border-b border-emerald-200/60 dark:border-emerald-800/60">
+              <div className="flex items-center gap-2">
+                <div className="w-7 h-7 rounded-lg bg-emerald-100 dark:bg-emerald-900/50 flex items-center justify-center text-emerald-600 dark:text-emerald-400 shrink-0">
+                  <FileText size={14} />
+                </div>
+                <div>
+                  <p className="text-[9px] font-black uppercase tracking-widest text-emerald-600 dark:text-emerald-500">JD ที่มีในระบบ</p>
+                  <p className="text-xs font-bold text-gray-700 dark:text-gray-200 truncate max-w-[280px]">{existingJD.jdFileName || 'ไฟล์ JD'}</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-1">
+                {/* ปุ่มเปิดในแท็บใหม่ */}
+                {previewUrl && (
+                  <a href={previewUrl} target="_blank" rel="noreferrer"
+                    className="p-1.5 rounded-lg text-gray-400 hover:text-emerald-600 hover:bg-emerald-100 dark:hover:bg-emerald-900/30 transition-colors"
+                    title="เปิดในแท็บใหม่"
+                  >
+                    <ExternalLink size={13} />
+                  </a>
+                )}
+                {/* ปุ่ม toggle preview */}
+                <button
+                  type="button"
+                  onClick={previewUrl ? () => setPreviewUrl(null) : handleOpenExistingJD}
+                  disabled={openingJD}
+                  className="p-1.5 rounded-lg text-gray-400 hover:text-emerald-600 hover:bg-emerald-100 dark:hover:bg-emerald-900/30 transition-colors disabled:opacity-50"
+                  title={previewUrl ? 'ซ่อน PDF' : 'ดู PDF'}
+                >
+                  {openingJD ? <Loader2 size={13} className="animate-spin" /> : previewUrl ? <X size={13} /> : <FileText size={13} />}
+                </button>
+              </div>
+            </div>
+
+            {/* PDF iframe หรือ placeholder */}
+            {previewUrl ? (
+              <iframe
+                src={previewUrl}
+                className="w-full border-0 bg-gray-100 dark:bg-slate-800"
+                style={{ height: 'calc(100vh - 160px)', minHeight: '600px' }}
+                title="JD Preview"
+              />
+            ) : (
+              <div className="flex flex-col items-center justify-center gap-3 py-8 px-5">
+                <div className="w-12 h-12 rounded-2xl bg-emerald-100 dark:bg-emerald-900/40 flex items-center justify-center text-emerald-500">
+                  <FileText size={22} />
+                </div>
+                <div className="text-center">
+                  <p className="text-[11px] text-gray-400 dark:text-slate-500">
+                    อัพโหลดเมื่อ {existingJD.createdAt?.toDate?.().toLocaleDateString('th-TH') || '—'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleOpenExistingJD}
+                  disabled={openingJD}
+                  className="w-full flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-bold rounded-2xl bg-white dark:bg-slate-900 border border-emerald-300 dark:border-emerald-700 text-[#008065] dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-900/30 transition-colors disabled:opacity-60 shadow-sm"
+                >
+                  {openingJD ? <Loader2 size={14} className="animate-spin" /> : <FileText size={14} />}
+                  เปิดดูไฟล์ JD
+                </button>
+                <p className="text-[10px] text-emerald-700/40 dark:text-emerald-500/40 text-center">
+                  อัพโหลดใหม่ได้ในฟอร์มด้านซ้าย
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
+    </>
   )
 }

@@ -9,14 +9,14 @@ export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
  * อัพโหลดไฟล์ JD ไปยัง Supabase Storage
  * @param {File} file - ไฟล์ที่จะอัพโหลด
  * @param {string} requestId - Firebase doc ID ใช้เป็น folder
- * @param {string} userEmail - email ผู้อัพโหลด (ใช้ sign JWT)
+ * @param {string} accessToken - reserved for future authenticated upload flow
  * @returns {Promise<{url: string|null, error: string|null}>}
  */
 export async function uploadJDFile(file, requestId, accessToken) {
+  void accessToken
   try {
-    // Sign in to Supabase with Firebase token workaround → ใช้ anon + path-based security
-    const ext      = file.name.split('.').pop()
-    const filePath = `${requestId}/${Date.now()}.${ext}`
+    const fileName = file.name.replace(/\s+/g, '_') // แทนที่ช่องว่างด้วย underscore
+    const filePath = `${requestId}/${Date.now()}_${fileName}`
 
     const { error: uploadError } = await supabase.storage
       .from('jd-files')
@@ -48,4 +48,65 @@ export async function getJDSignedUrl(filePath) {
 
   if (error) return null
   return data.signedUrl
+}
+
+/**
+ * ดึงรายการไฟล์ทั้งหมดใน bucket jd-files
+ */
+export async function listJDFiles() {
+  try {
+    // ดึงโฟลเดอร์ทั้งหมด (requestId)
+    const { data: folders, error: foldersError } = await supabase.storage
+      .from('jd-files')
+      .list('', { limit: 100 })
+
+    if (foldersError) throw foldersError
+
+    let allFiles = []
+
+    // วนลูปดึงไฟล์ในแต่ละโฟลเดอร์
+    for (const folder of folders) {
+      if (folder.name === '.emptyFolderPlaceholder') continue
+
+      const { data: files, error: filesError } = await supabase.storage
+        .from('jd-files')
+        .list(folder.name, { limit: 100 })
+
+      if (filesError) {
+        console.error(`Error listing folder ${folder.name}:`, filesError)
+        continue
+      }
+
+      const filesWithDetails = files.map(f => ({
+        ...f,
+        folder: folder.name,
+        path: `${folder.name}/${f.name}`
+      }))
+
+      allFiles = [...allFiles, ...filesWithDetails]
+    }
+
+    return { data: allFiles, error: null }
+  } catch (err) {
+    console.error('[listJDFiles]', err)
+    return { data: [], error: err.message }
+  }
+}
+
+/**
+ * ลบไฟล์ JD ออกจาก Supabase Storage
+ */
+export async function deleteJDFile(filePath) {
+  if (!filePath) return
+  try {
+    const { error } = await supabase.storage
+      .from('jd-files')
+      .remove([filePath])
+
+    if (error) throw error
+    return { success: true, error: null }
+  } catch (err) {
+    console.error('[deleteJDFile]', err)
+    return { success: false, error: err.message }
+  }
 }

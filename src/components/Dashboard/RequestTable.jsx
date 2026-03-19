@@ -1,10 +1,11 @@
 import { useEffect, useState, useMemo } from 'react'
-import { collection, onSnapshot, orderBy, query, doc, updateDoc } from 'firebase/firestore'
+import { collection, onSnapshot, orderBy, query, doc, updateDoc, getDocs, where, deleteDoc, serverTimestamp } from 'firebase/firestore'
 import { db } from '../../services/firebase'
 import { sendStatusUpdate } from '../../services/webhook'
 import { logAudit } from '../../services/auditLog'
-import { Loader2, UserCheck, XCircle, ChevronUp, ChevronDown, ChevronsUpDown, SlidersHorizontal, X, FileText, Search, ChevronRight, Users, Calendar, AlignLeft, ClipboardList } from 'lucide-react'
-import { getJDSignedUrl } from '../../services/supabase'
+import { Loader2, UserCheck, XCircle, ChevronUp, ChevronDown, ChevronsUpDown, SlidersHorizontal, X, FileText, Search, ChevronRight, Users, Calendar, AlignLeft, ClipboardList, Pencil, Trash2 } from 'lucide-react'
+import { getJDSignedUrl, deleteJDFile } from '../../services/supabase'
+import ConfirmModal from '../Shared/ConfirmModal'
 
 // Freshket brand colors
 const STATUS_CONFIG = {
@@ -17,8 +18,14 @@ const STATUS_CONFIG = {
 }
 
 const STATUS_TABS = ['ทั้งหมด', 'Open', 'Recruiting', 'Interviewing', 'Offering', 'Closed', 'Cancelled']
-const TA_STATUSES = ['Recruiting', 'Interviewing', 'Offering', 'Closed']
+const TA_STATUSES = ['Open', 'Recruiting', 'Interviewing', 'Offering', 'Closed']
 const ALL_STATUSES = ['Open', 'Recruiting', 'Interviewing', 'Offering', 'Closed', 'Cancelled']
+
+function getAvailableStatuses(currentStatus) {
+  const options = TA_STATUSES.filter(s => s !== 'Open')
+  if (!options.includes(currentStatus)) return [currentStatus, ...options]
+  return options
+}
 
 function StatusBadge({ status }) {
   const cfg = STATUS_CONFIG[status] ?? { label: status, bg: 'bg-gray-50', text: 'text-gray-500', border: 'border-gray-200' }
@@ -32,18 +39,20 @@ function StatusBadge({ status }) {
 function SortIcon({ field, sortField, sortDir }) {
   if (sortField !== field) return <ChevronsUpDown size={12} className="text-gray-300" />
   return sortDir === 'asc'
-    ? <ChevronUp size={12} style={{ color: '#008065' }} />
-    : <ChevronDown size={12} style={{ color: '#008065' }} />
+    ? <ChevronUp size={12} className="text-[#008065]" />
+    : <ChevronDown size={12} className="text-[#008065]" />
 }
 
 export default function RequestTable({
-  user, role, onStatsChange,
+  user, role, department, onStatsChange,
   filterMine = false, filterMyCases = false, showFilters = false,
 }) {
   const [requests, setRequests]     = useState([])
   const [loading, setLoading]       = useState(true)
   const [updating, setUpdating]     = useState(null)
   const [expandedId, setExpandedId] = useState(null)
+  const [allTAs, setAllTAs]         = useState([])
+  const [reassigningId, setReassigningId] = useState(null)
   const [search, setSearch]         = useState('')
   const [activeTab, setActiveTab]   = useState('ทั้งหมด')
   const [filterDept, setFilterDept] = useState('')
@@ -53,6 +62,7 @@ export default function RequestTable({
   const [showFilterBar, setShowFilterBar]   = useState(false)
   const [sortField, setSortField]   = useState('createdAt')
   const [sortDir, setSortDir]       = useState('desc')
+  const [confirmState, setConfirmState] = useState({ isOpen: false, action: null, payload: null })
 
   useEffect(() => {
     const q = query(collection(db, 'hc_requests'), orderBy('createdAt', 'desc'))
@@ -73,6 +83,15 @@ export default function RequestTable({
     })
   }, [onStatsChange])
 
+  useEffect(() => {
+    if (role === 'admin' || role === 'ta') {
+      const q = query(collection(db, 'users'), where('role', 'in', ['ta', 'admin']))
+      getDocs(q).then(snap => {
+        setAllTAs(snap.docs.map(d => ({ email: d.id, name: d.data().name || d.id })))
+      }).catch(e => console.error('Error fetching TAs:', e))
+    }
+  }, [role])
+
   async function handleCancel(id) {
     setUpdating(id)
     const req = requests.find((r) => r.id === id)
@@ -85,17 +104,161 @@ export default function RequestTable({
   async function handleClaim(id) {
     setUpdating(id)
     const req = requests.find((r) => r.id === id)
-    await updateDoc(doc(db, 'hc_requests', id), { status: 'Recruiting', assignedTo: user.email, assignedToName: user.displayName })
-    sendStatusUpdate(id, 'Recruiting', user.displayName)
+    await updateDoc(doc(db, 'hc_requests', id), { status: 'Recruiting', assignedTo: user.email, assignedToName: user.displayName, assignedAt: serverTimestamp() })
+    sendStatusUpdate(id, 'Recruiting', user.displayName, new Date().toISOString())
     logAudit({ requestId: id, action: 'Assign', by: user.email, byName: user.displayName, fromStatus: req?.status, toStatus: 'Recruiting', position: req?.position, department: req?.department })
     setUpdating(null)
   }
 
   async function handleStatusChange(id, newStatus) {
     const req = requests.find((r) => r.id === id)
-    await updateDoc(doc(db, 'hc_requests', id), { status: newStatus })
-    sendStatusUpdate(id, newStatus)
-    logAudit({ requestId: id, action: 'StatusChange', by: user.email, byName: user.displayName, fromStatus: req?.status, toStatus: newStatus, position: req?.position, department: req?.department })
+
+    const updateData = { status: newStatus }
+
+    // Auto-assign if changing from Open to a working status and not already assigned
+    if (req.status === 'Open' && ['Recruiting', 'Interviewing', 'Offering', 'Closed'].includes(newStatus) && !req.assignedTo) {
+      updateData.assignedTo = user.email
+      updateData.assignedToName = user.displayName
+      updateData.assignedAt = serverTimestamp()
+    }
+
+    await updateDoc(doc(db, 'hc_requests', id), updateData)
+    const assignedAt = updateData.assignedAt ? new Date().toISOString() : req.assignedAt?.toDate?.().toISOString()
+    sendStatusUpdate(id, newStatus, updateData.assignedToName || req.assignedToName, assignedAt)
+    logAudit({
+      requestId: id,
+      action: 'StatusChange',
+      by: user.email,
+      byName: user.displayName,
+      fromStatus: req?.status,
+      toStatus: newStatus,
+      position: req?.position,
+      department: req?.department
+    })
+  }
+
+  async function handleReassign(id, newTAEmail, newTAName) {
+    setUpdating(id)
+    const req = requests.find((r) => r.id === id)
+    const now = new Date().toISOString()
+    await updateDoc(doc(db, 'hc_requests', id), {
+      assignedTo: newTAEmail,
+      assignedToName: newTAName,
+      assignedAt: serverTimestamp(),
+    })
+    sendStatusUpdate(id, req?.status, newTAName, now)
+    logAudit({ 
+      requestId: id, 
+      action: 'Assign', 
+      by: user.email, 
+      byName: user.displayName, 
+      fromStatus: req?.status, 
+      toStatus: req?.status, 
+      position: req?.position, 
+      department: req?.department,
+      note: `Reassigned from ${req.assignedToName} to ${newTAName}`
+    })
+    setReassigningId(null)
+    setUpdating(null)
+  }
+
+  async function handleDelete(id) {
+    setUpdating(id)
+    try {
+      const req = requests.find((r) => r.id === id)
+      
+      // 1. ลบไฟล์ JD ใน Supabase Storage (ถ้ามี)
+      if (req?.jdFilePath) {
+        await deleteJDFile(req.jdFilePath)
+      }
+
+      // 2. ลบ Document ใน Firestore
+      await deleteDoc(doc(db, 'hc_requests', id))
+
+      logAudit({ 
+        requestId: id, 
+        action: 'Delete', 
+        by: user.email, 
+        byName: user.displayName, 
+        position: req?.position, 
+        department: req?.department,
+        note: 'Permanently deleted from database & storage by Admin'
+      })
+    } catch (e) {
+      console.error('Delete error:', e)
+      alert('เกิดข้อผิดพลาดในการลบข้อมูล')
+    }
+    setUpdating(null)
+  }
+
+  function openConfirm(action, payload) {
+    setConfirmState({ isOpen: true, action, payload })
+  }
+
+  function closeConfirm() {
+    if (confirmState.action === 'reassign') setReassigningId(null)
+    setConfirmState({ isOpen: false, action: null, payload: null })
+  }
+
+  async function handleConfirm() {
+    const { action, payload } = confirmState
+    try {
+      if (action === 'cancel') await handleCancel(payload.id)
+      if (action === 'close') await handleStatusChange(payload.id, 'Closed')
+      if (action === 'reassign') await handleReassign(payload.id, payload.email, payload.name)
+      if (action === 'delete') await handleDelete(payload.id)
+    } catch (err) {
+      console.error('[handleConfirm] error:', err)
+    } finally {
+      closeConfirm()
+    }
+  }
+
+  function getConfirmContent() {
+    const { action, payload } = confirmState
+
+    if (action === 'cancel') {
+      return {
+        title: 'ยืนยันการยกเลิกคำขอ',
+        message: 'ต้องการยกเลิกคำขอนี้ใช่หรือไม่? หลังยกเลิกแล้วเคสจะไม่อยู่ในกระบวนการต่อ',
+        confirmText: 'ยืนยันการยกเลิก',
+        variant: 'warning',
+      }
+    }
+
+    if (action === 'close') {
+      return {
+        title: 'ปิดเคสนี้',
+        message: 'ต้องการเปลี่ยนสถานะเป็น Closed ใช่หรือไม่? หลังจากนี้การแก้ไขบางส่วนอาจไม่สามารถทำได้',
+        confirmText: 'ปิดเคส',
+        variant: 'info',
+      }
+    }
+
+    if (action === 'reassign') {
+      return {
+        title: 'ย้ายผู้ดูแลเคส',
+        message: payload ? `ต้องการย้ายเคสนี้ไปให้ ${payload.name} ดูแลแทนใช่หรือไม่?` : '',
+        confirmText: 'ยืนยันการย้าย',
+        variant: 'warning',
+      }
+    }
+
+    if (action === 'delete') {
+      return {
+        title: 'ลบคำขอออกจากระบบ',
+        message: 'ต้องการลบรายการนี้ออกจากฐานข้อมูลและไฟล์ที่เกี่ยวข้องถาวรใช่หรือไม่? การกระทำนี้ไม่สามารถย้อนกลับได้',
+        confirmText: 'ลบถาวร',
+        variant: 'danger',
+      }
+    }
+
+    return {
+      title: 'ยืนยันการทำรายการ',
+      message: '',
+      confirmText: 'ยืนยัน',
+      variant: 'info',
+    }
   }
 
   function toggleSort(field) {
@@ -108,18 +271,46 @@ export default function RequestTable({
 
   // Tab counts
   const tabCounts = useMemo(() => {
-    const base = filterMine ? requests.filter(r => r.requesterEmail === user.email)
-                : filterMyCases ? requests.filter(r => r.assignedTo === user.email)
-                : requests
+    let base = [...requests]
+    
+    // Visibility logic
+    if (role === 'manager') {
+      // สำหรับ Manager: เห็นเฉพาะของตัวเอง + แผนกตัวเอง (หรือแผนกที่ override มาเทส)
+      base = base.filter(r => r.requesterEmail === user.email || r.department === department)
+    } else if (role === 'ta' && department) {
+      // สำหรับ TA ถ้ามีการ override แผนก ให้กรองตามแผนก
+      base = base.filter(r => r.department === department)
+    }
+
+    // Sub-filters (Tabs / Toggle)
+    if (filterMine) base = base.filter(r => r.requesterEmail === user.email)
+    if (filterMyCases) {
+      base = role === 'admin'
+        ? base.filter(r => Boolean(r.assignedTo))
+        : base.filter(r => r.assignedTo === user.email)
+    }
+
     const counts = { ทั้งหมด: base.length }
     ALL_STATUSES.forEach(s => { counts[s] = base.filter(r => r.status === s).length })
     return counts
-  }, [requests, filterMine, filterMyCases, user.email])
+  }, [requests, filterMine, filterMyCases, user.email, role, department])
 
   const displayed = useMemo(() => {
     let list = [...requests]
-    if (filterMine)    list = list.filter((r) => r.requesterEmail === user.email)
-    if (filterMyCases) list = list.filter((r) => r.assignedTo === user.email)
+    
+    // Visibility logic (must match tabCounts)
+    if (role === 'manager') {
+      list = list.filter(r => r.requesterEmail === user.email || r.department === department)
+    } else if (role === 'ta' && department) {
+      list = list.filter(r => r.department === department)
+    }
+
+    if (filterMine) list = list.filter((r) => r.requesterEmail === user.email)
+    if (filterMyCases) {
+      list = role === 'admin'
+        ? list.filter((r) => Boolean(r.assignedTo))
+        : list.filter((r) => r.assignedTo === user.email)
+    }
     if (activeTab !== 'ทั้งหมด') list = list.filter((r) => r.status === activeTab)
     if (filterDept)    list = list.filter((r) => r.department === filterDept)
     if (filterAssigned) list = list.filter((r) => r.assignedToName === filterAssigned)
@@ -142,7 +333,7 @@ export default function RequestTable({
       return 0
     })
     return list
-  }, [requests, filterMine, filterMyCases, activeTab, filterDept, filterAssigned, filterDateFrom, filterDateTo, search, sortField, sortDir, user.email])
+  }, [requests, filterMine, filterMyCases, activeTab, filterDept, filterAssigned, filterDateFrom, filterDateTo, search, sortField, sortDir, user.email, role, department])
 
   const hasAdvancedFilters = filterDept || filterAssigned || filterDateFrom || filterDateTo
 
@@ -150,7 +341,7 @@ export default function RequestTable({
 
   if (loading) return (
     <div className="flex items-center justify-center py-20 text-gray-400 gap-2">
-      <Loader2 size={20} className="animate-spin" style={{ color: '#008065' }} />
+      <Loader2 size={20} className="animate-spin text-[#008065]" />
       <span>กำลังโหลดข้อมูล...</span>
     </div>
   )
@@ -265,7 +456,7 @@ export default function RequestTable({
         <div className="text-center py-16 rounded-xl border border-dashed border-gray-200 bg-white">
           <p className="text-gray-400 font-medium">ไม่พบรายการ</p>
           {(hasAdvancedFilters || search || activeTab !== 'ทั้งหมด') && (
-            <button onClick={() => { clearAdvanced(); setSearch(''); setActiveTab('ทั้งหมด') }} className="text-sm mt-2 hover:underline" style={{ color: '#008065' }}>
+            <button onClick={() => { clearAdvanced(); setSearch(''); setActiveTab('ทั้งหมด') }} className="text-sm mt-2 hover:underline text-[#008065]">
               ล้าง filter ทั้งหมด
             </button>
           )}
@@ -306,9 +497,10 @@ export default function RequestTable({
                 const isAdmin  = role === 'admin'
                 const isExpanded      = expandedId === req.id
                 const canViewFile     = req.jdFilePath && (isTA || isOwner)
-                const canCancel       = (isOwner || isAdmin) && req.status === 'Open'
+                const canCancel       = isAdmin || (isTA && req.status !== 'Closed' && req.status !== 'Cancelled') || (isOwner && req.status === 'Open')
                 const canClaim        = isTA && req.status === 'Open'
-                const canUpdateStatus = isTA && !['Open', 'Closed', 'Cancelled'].includes(req.status)
+                const canUpdateStatus = filterMyCases && isTA && req.status !== 'Cancelled' && (req.status !== 'Closed' || isAdmin)
+                const canReassign     = isTA && (isAdmin || filterMyCases) && req.status !== 'Cancelled' && req.status !== 'Closed' && allTAs.length > 0
                 const isBusy          = updating === req.id
 
                 async function handleOpenFile(e) {
@@ -376,18 +568,63 @@ export default function RequestTable({
                             <select 
                               value={req.status} 
                               onClick={e => e.stopPropagation()}
-                              onChange={(e) => { e.stopPropagation(); handleStatusChange(req.id, e.target.value) }}
+                              onChange={(e) => {
+                                e.stopPropagation()
+                                if (e.target.value === 'Closed') {
+                                  openConfirm('close', { id: req.id })
+                                  return
+                                }
+                                handleStatusChange(req.id, e.target.value)
+                              }}
                               className="text-[10px] font-bold border border-emerald-500/30 rounded-lg px-2 py-1 bg-white dark:bg-slate-900 text-[#008065] dark:text-emerald-400 focus:outline-none cursor-pointer uppercase tracking-tight"
                             >
-                              {TA_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+                              {getAvailableStatuses(req.status).map((s) => <option key={s} value={s}>{s}</option>)}
                             </select>
                           )}
+                          {canReassign && (
+                            reassigningId === req.id ? (
+                              <select
+                                value=""
+                                onClick={e => e.stopPropagation()}
+                                onChange={(e) => {
+                                  e.stopPropagation()
+                                  const selected = allTAs.find(t => t.email === e.target.value)
+                                  if (selected) openConfirm('reassign', { id: req.id, email: selected.email, name: selected.name })
+                                  else setReassigningId(null)
+                                }}
+                                onBlur={() => setTimeout(() => setReassigningId(null), 200)}
+                                autoFocus
+                                className="text-[10px] font-bold border border-emerald-500/30 rounded-lg px-2 py-1 bg-white dark:bg-slate-900 text-[#008065] dark:text-emerald-400 focus:outline-none cursor-pointer"
+                              >
+                                <option value="">ย้ายไปที่...</option>
+                                {allTAs.map(t => (
+                                  <option key={t.email} value={t.email}>{t.name}</option>
+                                ))}
+                              </select>
+                            ) : (
+                              <button
+                                onClick={(e) => { e.stopPropagation(); setReassigningId(req.id) }}
+                                className="flex items-center gap-1.5 px-2.5 py-1 text-[10px] font-bold border rounded-lg transition-all bg-white dark:bg-slate-900 text-[#008065] dark:text-emerald-400 border-emerald-500/30 hover:bg-emerald-50 dark:hover:bg-emerald-900/30 uppercase tracking-tight"
+                              >
+                                <Pencil size={11} strokeWidth={3} />
+                                ย้ายคนดูแลเคส
+                              </button>
+                            )
+                          )}
                           {canCancel && (
-                            <button onClick={(e) => { e.stopPropagation(); handleCancel(req.id) }} disabled={isBusy}
+                            <button onClick={(e) => { e.stopPropagation(); openConfirm('cancel', { id: req.id }) }} disabled={isBusy}
                               className="flex items-center gap-1.5 px-2.5 py-1 text-red-500 dark:text-red-400 text-[10px] font-bold border border-red-200 dark:border-red-900/30 rounded-lg hover:bg-red-50 dark:hover:bg-red-950/20 disabled:opacity-50 transition-all uppercase tracking-tight"
                             >
                               {isBusy ? <Loader2 size={11} className="animate-spin" /> : <XCircle size={11} strokeWidth={3} />}
                               ยกเลิก
+                            </button>
+                          )}
+                          {isAdmin && (
+                            <button onClick={(e) => { e.stopPropagation(); openConfirm('delete', { id: req.id }) }} disabled={isBusy}
+                              className="flex items-center gap-1.5 px-2.5 py-1 text-white bg-red-600 dark:bg-red-700 text-[10px] font-bold rounded-lg hover:bg-red-700 dark:hover:bg-red-800 disabled:opacity-50 transition-all uppercase tracking-tight shadow-sm"
+                            >
+                              {isBusy ? <Loader2 size={11} className="animate-spin" /> : <Trash2 size={11} strokeWidth={3} />}
+                              ลบ
                             </button>
                           )}
                         </div>
@@ -409,13 +646,14 @@ export default function RequestTable({
                                 </p>
                                 <p className="text-xl font-black text-[#008065] dark:text-emerald-500 tabular-nums">{req.headcount ?? 1} <span className="text-sm font-bold text-gray-400">คน</span></p>
                               </div>
-                              <div>
-                                <p className="text-[10px] font-black text-gray-400 dark:text-slate-600 uppercase tracking-widest flex items-center gap-1.5 mb-2">
-                                  <Calendar size={12} strokeWidth={3} />
-                                  {req.requestType === 'Replacement' ? 'วันที่ลาออก (LWD)' : 'วันที่รับคนเข้า'}
-                                </p>
-                                <p className="text-sm font-extrabold text-gray-700 dark:text-gray-200">{req.targetStartDate || '—'}</p>
-                              </div>
+                              {req.requestType === 'Replacement' && (
+                                <div>
+                                  <p className="text-[10px] font-black text-gray-400 dark:text-slate-600 uppercase tracking-widest flex items-center gap-1.5 mb-2">
+                                    <Calendar size={12} strokeWidth={3} /> วันที่ลาออก (LWD)
+                                  </p>
+                                  <p className="text-sm font-extrabold text-gray-700 dark:text-gray-200">{req.targetStartDate || '—'}</p>
+                                </div>
+                              )}
                               {req.requestType === 'Replacement' && req.replacementFor && (
                                 <div>
                                   <p className="text-[10px] font-black text-gray-400 dark:text-slate-600 uppercase tracking-widest mb-2">ทดแทนพนักงานเดิม</p>
@@ -480,6 +718,12 @@ export default function RequestTable({
           </table>
         </div>
       )}
+      <ConfirmModal
+        isOpen={confirmState.isOpen}
+        onClose={closeConfirm}
+        onConfirm={handleConfirm}
+        {...getConfirmContent()}
+      />
     </div>
   )
 }
