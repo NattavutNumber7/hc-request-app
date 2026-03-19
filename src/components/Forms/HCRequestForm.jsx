@@ -8,6 +8,7 @@ import { Loader2, CheckCircle, ChevronDown, X, Paperclip, FileText, ExternalLink
 import { HQ_JG_LEVELS, OPERATION_JG_LEVELS } from '../../data/jobGrades'
 import { fetchSheetsData, getDepartmentByEmail, getEmployeesByDepartment, getPositionsByDepartment } from '../../services/sheetsData'
 
+// ─── Default state ของฟอร์ม (reset หลัง submit สำเร็จ) ───
 const INITIAL_FORM = {
   requestType: 'New HC',
   position: '',
@@ -21,6 +22,10 @@ const INITIAL_FORM = {
   replacementFor: '',
 }
 
+// ─── กฎการกำหนด Track ตามชื่อแผนก ───
+// Operation-only: Processing Center, DC → lock OPERATION
+// Hybrid: Supply Chain → ให้เลือก HQ / OPERATION
+// อื่นๆ: → lock HQ
 const OPERATION_ONLY_DEPARTMENT_PREFIXES = ['Processing Center', 'Distribution Center']
 const HYBRID_DEPARTMENT_PREFIXES = ['Supply Chain & Operation Strategy']
 
@@ -52,7 +57,10 @@ function getTimestampMs(ts) {
   return ts?.toDate?.()?.getTime?.() ?? 0
 }
 
-// Combobox: dropdown + พิมพ์เองได้
+/**
+ * PositionCombobox — dropdown ที่พิมพ์ค้นหาได้ด้วย
+ * ถ้าพิมพ์ชื่อที่ไม่มีใน list → ระบบจะบันทึกเป็น custom_position ใน Firestore
+ */
 function PositionCombobox({ value, onChange, positions, required }) {
   const [open, setOpen] = useState(false)
   const [searchText, setSearchText] = useState('') // ใช้กรองเท่านั้น
@@ -155,7 +163,7 @@ export default function HCRequestForm({ user, role }) {
   const [openingJD, setOpeningJD] = useState(false)
   const [previewUrl, setPreviewUrl] = useState(null)   // URL สำหรับ inline PDF viewer
 
-  // โหลด positions, employees และ auto-fill department จาก Google Sheets
+  // ─── โหลด Positions + Employees จาก Google Sheets และ auto-fill แผนกของ user ───
   useEffect(() => {
     fetchSheetsData().then(({ managers, positions: pos, employees: emp }) => {
       if (pos && typeof pos === 'object') {
@@ -173,6 +181,8 @@ export default function HCRequestForm({ user, role }) {
     })
   }, [user.email])
 
+  // ─── โหลด Custom Positions ที่ถูกสร้างไว้ใน Firestore ตามแผนกที่เลือก ───
+  // Custom position คือตำแหน่งที่ไม่มีใน Google Sheets แต่ถูก submit เข้ามาก่อน
   useEffect(() => {
     if (!form.department) {
       setCustomPositions([])
@@ -195,6 +205,8 @@ export default function HCRequestForm({ user, role }) {
     return () => { cancelled = true }
   }, [form.department])
 
+  // ─── ค้นหาไฟล์ JD ที่มีอยู่แล้วสำหรับตำแหน่ง + แผนก + track เดียวกัน ───
+  // เพื่อแสดง JD Preview Sidebar ให้ Manager ดูก่อน submit
   useEffect(() => {
     if (!form.position || !form.department) {
       setExistingJD(null)
@@ -236,6 +248,7 @@ export default function HCRequestForm({ user, role }) {
     feedbackTopRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }, [success, error])
 
+  // สร้าง signed URL อายุ 1 ชั่วโมง แล้วแสดงใน iframe sidebar
   async function handleOpenExistingJD() {
     if (!existingJD?.jdFilePath) return
     setOpeningJD(true)
@@ -298,6 +311,7 @@ export default function HCRequestForm({ user, role }) {
       const knownFromCustom = customPositions
         .some((p) => normalizeText(p.position) === normalizedPosition && (p.orgTrack || '') === (payload.orgTrack || ''))
 
+      // ─── บันทึก Custom Position ถ้าชื่อตำแหน่งไม่มีใน Sheets หรือ Firestore ───
       if (!knownFromSheet && !knownFromCustom && normalizedPosition) {
         const customDoc = {
           department: payload.department,

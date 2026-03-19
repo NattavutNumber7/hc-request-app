@@ -7,7 +7,7 @@ import { Loader2, UserCheck, XCircle, ChevronUp, ChevronDown, ChevronsUpDown, Sl
 import { getJDSignedUrl, deleteJDFile } from '../../services/supabase'
 import ConfirmModal from '../Shared/ConfirmModal'
 
-// Freshket brand colors
+// ─── สี Badge ของแต่ละสถานะ (light + dark mode) ───
 const STATUS_CONFIG = {
   Open:         { label: 'Open',         bg: 'bg-yellow-50 dark:bg-yellow-500/10',     text: 'text-yellow-700 dark:text-yellow-500',   border: 'border-yellow-200 dark:border-yellow-500/20' },
   Recruiting:   { label: 'Recruiting',   bg: 'bg-emerald-50 dark:bg-emerald-500/10',   text: 'text-emerald-700 dark:text-emerald-500', border: 'border-emerald-200 dark:border-emerald-500/20' },
@@ -17,10 +17,12 @@ const STATUS_CONFIG = {
   Cancelled:    { label: 'Cancelled',    bg: 'bg-gray-50 dark:bg-slate-900',           text: 'text-gray-500 dark:text-slate-500',     border: 'border-gray-200 dark:border-slate-800' },
 }
 
+// ─── Tab list และสถานะที่ TA สามารถเปลี่ยนได้ (ยกเว้น Open) ───
 const STATUS_TABS = ['ทั้งหมด', 'Open', 'Recruiting', 'Interviewing', 'Offering', 'Closed', 'Cancelled']
 const TA_STATUSES = ['Open', 'Recruiting', 'Interviewing', 'Offering', 'Closed']
 const ALL_STATUSES = ['Open', 'Recruiting', 'Interviewing', 'Offering', 'Closed', 'Cancelled']
 
+// คืน list สถานะที่เปลี่ยนได้ → ไม่รวม Open (TA ไม่สามารถย้อนกลับมา Open ได้)
 function getAvailableStatuses(currentStatus) {
   const options = TA_STATUSES.filter(s => s !== 'Open')
   if (!options.includes(currentStatus)) return [currentStatus, ...options]
@@ -64,6 +66,8 @@ export default function RequestTable({
   const [sortDir, setSortDir]       = useState('desc')
   const [confirmState, setConfirmState] = useState({ isOpen: false, action: null, payload: null })
 
+  // ─── Realtime listener: ดึง hc_requests จาก Firestore แบบ realtime ───
+  // คำนวณ stats (open/assigned/closed) และส่งกลับผ่าน onStatsChange callback
   useEffect(() => {
     const q = query(collection(db, 'hc_requests'), orderBy('createdAt', 'desc'))
     return onSnapshot(q, (snapshot) => {
@@ -83,6 +87,7 @@ export default function RequestTable({
     })
   }, [onStatsChange])
 
+  // ─── โหลดรายชื่อ TA/Admin สำหรับ dropdown reassign ───
   useEffect(() => {
     if (role === 'admin' || role === 'ta') {
       const q = query(collection(db, 'users'), where('role', 'in', ['ta', 'admin']))
@@ -92,6 +97,7 @@ export default function RequestTable({
     }
   }, [role])
 
+  // ─── Action Handlers ─────────────────────────────────────────
   async function handleCancel(id) {
     setUpdating(id)
     const req = requests.find((r) => r.id === id)
@@ -110,6 +116,7 @@ export default function RequestTable({
     setUpdating(null)
   }
 
+  // Auto-assign TA ถ้ายังไม่มีคนรับเคสและเปลี่ยนจาก Open → working status
   async function handleStatusChange(id, newStatus) {
     const req = requests.find((r) => r.id === id)
 
@@ -269,7 +276,7 @@ export default function RequestTable({
   const departments = useMemo(() => [...new Set(requests.map((r) => r.department).filter(Boolean))].sort(), [requests])
   const assignees   = useMemo(() => [...new Set(requests.map((r) => r.assignedToName).filter(Boolean))].sort(), [requests])
 
-  // Tab counts
+  // ─── คำนวณจำนวนรายการในแต่ละ Tab (นับตาม visibility rule เดียวกับ displayed) ───
   const tabCounts = useMemo(() => {
     let base = [...requests]
     
@@ -295,9 +302,11 @@ export default function RequestTable({
     return counts
   }, [requests, filterMine, filterMyCases, user.email, role, department])
 
+  // ─── กรองและเรียงข้อมูลสำหรับแสดงในตาราง ───
+  // Visibility: manager เห็นเฉพาะของตัวเอง + แผนก, ta/admin เห็นทั้งหมด
   const displayed = useMemo(() => {
     let list = [...requests]
-    
+
     // Visibility logic (must match tabCounts)
     if (role === 'manager') {
       list = list.filter(r => r.requesterEmail === user.email || r.department === department)
@@ -492,6 +501,7 @@ export default function RequestTable({
             </thead>
             <tbody className="divide-y divide-gray-50 dark:divide-slate-800/50">
               {displayed.map((req) => {
+                // ─── Permission flags สำหรับแต่ละแถว ───
                 const isOwner  = req.requesterEmail === user.email
                 const isTA     = role === 'ta' || role === 'admin'
                 const isAdmin  = role === 'admin'

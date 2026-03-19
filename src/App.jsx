@@ -18,6 +18,7 @@ import HCRequestForm from './components/Forms/HCRequestForm'
 
 const DEV_EMAIL = import.meta.env.VITE_DEV_EMAIL
 
+// ─── Dev Tool: แสดงเฉพาะเมื่อมี VITE_DEV_EMAIL ใน .env (ใช้ test role/dept) ───
 function RoleSwitcher({ currentRole, onSwitch, currentDept, onDeptSwitch }) {
   if (!DEV_EMAIL) return null
   return (
@@ -64,6 +65,7 @@ function RoleSwitcher({ currentRole, onSwitch, currentDept, onDeptSwitch }) {
   )
 }
 
+// ─── Layout หลักที่ครอบทุกหน้า (NavBar + main content) ───
 function Layout({ user, role, isDarkMode, toggleDarkMode, children }) {
   return (
     <div className="min-h-screen flex flex-col transition-colors duration-300 bg-[#f5f7f6] dark:bg-slate-950">
@@ -75,13 +77,14 @@ function Layout({ user, role, isDarkMode, toggleDarkMode, children }) {
   )
 }
 
-// Protected Route Wrapper
+// ─── Guard: ป้องกันการเข้าหน้าที่ไม่มีสิทธิ์ → redirect ไปหน้าที่กำหนด ───
 function RoleGuard({ role, allowed, children, redirectTo }) {
   if (!role) return null
   if (allowed.includes(role)) return children
   return <Navigate to={redirectTo} replace />
 }
 
+// ─── Pages ──────────────────────────────────────────────────────────────────
 function DashboardPage({ user, role, department, isDarkMode, toggleDarkMode }) {
   const [stats, setStats] = useState({ open: 0, assigned: 0, closed: 0, total: 0 })
   const [requests, setRequests] = useState([])
@@ -162,6 +165,7 @@ function MyCasesPage({ user, role, department, isDarkMode, toggleDarkMode }) {
   )
 }
 
+// ─── Admin: จัดการ User Role (manager / ta / admin) ผ่าน Firestore users collection ───
 function UserManagementPage({ user, role, isDarkMode, toggleDarkMode }) {
   const [users, setUsers] = useState([])
   const [loading, setLoading] = useState(true)
@@ -332,6 +336,8 @@ function UserManagementPage({ user, role, isDarkMode, toggleDarkMode }) {
   )
 }
 
+// ─── Admin/TA: คลังไฟล์ JD ทั้งหมดจาก Supabase Storage ───
+// requestMap: index ด้วยทั้ง docId (ไฟล์ใหม่) และ tmp_* folder (ไฟล์เก่า)
 function JDFilesPage({ user, role, isDarkMode, toggleDarkMode }) {
   const [files, setFiles] = useState([])
   const [requestMap, setRequestMap] = useState({})
@@ -519,6 +525,7 @@ const STATUS_CONFIG = {
   Cancel: { label: 'ยกเลิก', bg: 'bg-rose-50 dark:bg-rose-500/10', text: 'text-rose-700 dark:text-rose-400', border: 'border-rose-200 dark:border-rose-500/20' },
 }
 
+// ─── Admin: ประวัติการเปลี่ยนแปลงทั้งหมด (hc_logs Firestore collection) ───
 function AuditLogPage({ user, role, isDarkMode, toggleDarkMode }) {
   const [logs, setLogs] = useState([])
   const [loading, setLoading] = useState(true)
@@ -650,6 +657,7 @@ function AuditLogPage({ user, role, isDarkMode, toggleDarkMode }) {
   )
 }
 
+// ─── Admin: จัดการตำแหน่งที่ถูก custom เพิ่มเข้ามา (ไม่มีใน Google Sheets) ───
 function CustomPositionsPage({ user, role, isDarkMode, toggleDarkMode }) {
   const [positions, setPositions] = useState([])
   const [loading, setLoading] = useState(true)
@@ -842,6 +850,10 @@ function CustomPositionsPage({ user, role, isDarkMode, toggleDarkMode }) {
   )
 }
 
+// ─── Root App ────────────────────────────────────────────────────────────────
+// Auth flow: Firebase onAuthStateChanged → ดึง role จาก Firestore users collection
+// Dark mode: เก็บใน localStorage → ใส่ class 'dark' ที่ <html> element
+// ─────────────────────────────────────────────────────────────────────────────
 export default function App() {
   const [user, setUser] = useState(null)
   const [authLoading, setAuthLoading] = useState(true)
@@ -851,6 +863,7 @@ export default function App() {
     return localStorage.getItem('theme') === 'dark'
   })
 
+  // ─── Sync dark mode กับ localStorage และ class ที่ html element ───
   useEffect(() => {
     if (isDarkMode) {
       document.documentElement.classList.add('dark')
@@ -867,6 +880,7 @@ export default function App() {
     })
   }
 
+  // ─── ตรวจสอบสถานะ login และดึง role ของ user จาก Firestore ───
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       if (firebaseUser) {

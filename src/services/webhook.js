@@ -1,3 +1,14 @@
+/**
+ * webhook.js
+ * ────────────────────────────────────────────────────────────
+ * Google Apps Script (GAS) Integration Layer
+ *
+ * sendToWebhook  → POST ข้อมูล HC Request ใหม่เข้า Google Sheets (doPost)
+ * sendStatusUpdate → GET updateStatus เมื่อสถานะเปลี่ยนใน Web App (doGet)
+ *
+ * หมายเหตุ: GAS ไม่รองรับ CORS preflight ดังนั้น POST ใช้ mode: 'no-cors'
+ * ────────────────────────────────────────────────────────────
+ */
 const WEBHOOK_URL = import.meta.env.VITE_GAS_WEBHOOK_URL
 const DATA_URL = import.meta.env.VITE_GAS_DATA_URL
 

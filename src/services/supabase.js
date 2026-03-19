@@ -1,3 +1,14 @@
+/**
+ * supabase.js
+ * ────────────────────────────────────────────────────────────
+ * Hybrid Storage Layer — ใช้ Supabase Storage สำหรับเก็บไฟล์ JD (PDF)
+ * ส่วน Auth และ Database หลักยังคงใช้ Firebase / Firestore
+ *
+ * Bucket  : jd-files  (private, ต้องใช้ signed URL ในการเข้าถึง)
+ * Folder  : {firestore_doc_id}/  (ใช้ docRef.id เป็นชื่อ folder)
+ * Auth    : anon key + signed URL แทน Firebase Auth token
+ * ────────────────────────────────────────────────────────────
+ */
 import { createClient } from '@supabase/supabase-js'
 
 const SUPABASE_URL      = import.meta.env.VITE_SUPABASE_URL
