@@ -142,7 +142,7 @@ export default function RequestTable({
 
     await updateDoc(doc(db, 'hc_requests', id), updateData)
     const assignedAt = updateData.assignedAt ? new Date().toISOString() : req.assignedAt?.toDate?.().toISOString()
-    sendStatusUpdate(id, newStatus, updateData.assignedToName || req.assignedToName, assignedAt)
+    sendStatusUpdate(id, newStatus, updateData.assignedToName || req.assignedToName, assignedAt, extraData.startDate || null)
     logAudit({
       requestId: id,
       action: newStatus === 'Rejected' ? 'Rejected' : 'StatusChange',

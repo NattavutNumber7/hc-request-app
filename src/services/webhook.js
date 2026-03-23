@@ -16,7 +16,7 @@ const DATA_URL = import.meta.env.VITE_GAS_DATA_URL
  * อัพเดต Status ใน Google Sheets เมื่อมีการเปลี่ยนแปลงใน Web App
  * ใช้ DATA_URL (doGet) แทน WEBHOOK_URL เพราะ updateStatus handler อยู่ใน doGet
  */
-export async function sendStatusUpdate(docId, status, assignedToName = null, assignedAt = null) {
+export async function sendStatusUpdate(docId, status, assignedToName = null, assignedAt = null, startDate = null) {
   if (!DATA_URL) {
     console.error('[sendStatusUpdate] VITE_GAS_DATA_URL not configured')
     return
@@ -25,6 +25,7 @@ export async function sendStatusUpdate(docId, status, assignedToName = null, ass
     const params = new URLSearchParams({ action: 'updateStatus', id: docId, status })
     if (assignedToName) params.set('assignedToName', assignedToName)
     if (assignedAt) params.set('assignedAt', assignedAt)
+    if (startDate) params.set('startDate', startDate)  // ส่งวันเริ่มงานตอน Offering
     const url = `${DATA_URL}?${params.toString()}`
     const res = await fetch(url)
     const json = await res.json()
