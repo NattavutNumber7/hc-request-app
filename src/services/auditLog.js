@@ -13,7 +13,7 @@ import { db } from './firebase'
  * @param {string} [params.position]   - ตำแหน่งของ request
  * @param {string} [params.department] - แผนกของ request
  */
-export async function logAudit({ requestId, action, by, byName, fromStatus, toStatus, position, department }) {
+export async function logAudit({ requestId, action, by, byName, fromStatus, toStatus, position, department, note }) {
   try {
     await addDoc(collection(db, 'hc_logs'), {
       requestId,
@@ -24,6 +24,7 @@ export async function logAudit({ requestId, action, by, byName, fromStatus, toSt
       toStatus:   toStatus   ?? null,
       position:   position   ?? '',
       department: department ?? '',
+      note:       note       ?? '',
       timestamp: serverTimestamp(),
     })
   } catch (error) {

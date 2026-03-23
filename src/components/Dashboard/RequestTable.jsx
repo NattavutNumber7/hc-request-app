@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from 'react'
+import { useEffect, useState, useMemo, Fragment } from 'react'
 import { collection, onSnapshot, orderBy, query, doc, updateDoc, getDocs, where, deleteDoc, serverTimestamp } from 'firebase/firestore'
 import { db } from '../../services/firebase'
 import { sendStatusUpdate } from '../../services/webhook'
@@ -193,7 +193,6 @@ export default function RequestTable({
       })
     } catch (e) {
       console.error('Delete error:', e)
-      alert('เกิดข้อผิดพลาดในการลบข้อมูล')
     }
     setUpdating(null)
   }
@@ -520,9 +519,8 @@ export default function RequestTable({
                 }
 
                 return (
-                  <>
+                  <Fragment key={req.id}>
                     <tr
-                      key={req.id}
                       className={`transition-all cursor-pointer group ${isExpanded ? 'bg-emerald-50/50 dark:bg-emerald-900/10' : 'hover:bg-gray-50/80 dark:hover:bg-slate-800/80'}`}
                       onClick={() => setExpandedId(isExpanded ? null : req.id)}
                     >
@@ -721,7 +719,7 @@ export default function RequestTable({
                         </td>
                       </tr>
                     )}
-                  </>
+                  </Fragment>
                 )
               })}
             </tbody>

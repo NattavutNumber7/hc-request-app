@@ -338,6 +338,8 @@ export default function HCRequestForm({ user, role }) {
 
       setSuccess(true)
       setForm((prev) => ({ ...INITIAL_FORM, department: prev.department, orgTrack: prev.orgTrack })) // คง department/track ไว้
+      setJdFile(null)        // reset ไฟล์ JD หลัง submit สำเร็จ
+      setPreviewUrl(null)    // ปิด JD preview
       setTimeout(() => setSuccess(false), 4000)
     } catch (err) {
       console.error('Submit error:', err)

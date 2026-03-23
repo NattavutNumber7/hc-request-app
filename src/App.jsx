@@ -391,13 +391,18 @@ function JDFilesPage({ user, role, isDarkMode, toggleDarkMode }) {
     try {
       await deleteJDFile(file.path)
 
-      // ล้าง reference ของไฟล์ JD ใน request ต้นทาง (ถ้ามี)
-      if (file.folder) {
-        await updateDoc(doc(db, 'hc_requests', file.folder), {
-          jdFilePath: deleteField(),
-          jdFileUrl: deleteField(),
-          jdFileName: deleteField(),
-        })
+      // ล้าง reference ของไฟล์ JD ใน request ต้นทาง (ถ้า folder เป็น Firestore doc ID)
+      // ข้าม folder ที่ขึ้นต้นด้วย tmp_ เพราะไม่ใช่ Firestore doc ID
+      if (file.folder && !file.folder.startsWith('tmp_')) {
+        try {
+          await updateDoc(doc(db, 'hc_requests', file.folder), {
+            jdFilePath: deleteField(),
+            jdFileUrl: deleteField(),
+            jdFileName: deleteField(),
+          })
+        } catch (e) {
+          console.error('[JDFilesPage] Could not clear Firestore ref:', e)
+        }
       }
 
       setFiles((prev) => prev.filter((f) => f.path !== file.path))
