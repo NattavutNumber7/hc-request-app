@@ -13,14 +13,15 @@ const STATUS_CONFIG = {
   Recruiting:   { label: 'Recruiting',   bg: 'bg-emerald-50 dark:bg-emerald-500/10',   text: 'text-emerald-700 dark:text-emerald-500', border: 'border-emerald-200 dark:border-emerald-500/20' },
   Interviewing: { label: 'Interviewing', bg: 'bg-orange-50 dark:bg-orange-500/10',     text: 'text-orange-700 dark:text-orange-500',   border: 'border-orange-200 dark:border-orange-500/20' },
   Offering:     { label: 'Offering',     bg: 'bg-indigo-50 dark:bg-indigo-500/10',     text: 'text-indigo-700 dark:text-indigo-500',   border: 'border-indigo-200 dark:border-indigo-500/20' },
+  Rejected:     { label: 'Rejected',     bg: 'bg-red-50 dark:bg-red-500/10',           text: 'text-red-700 dark:text-red-500',         border: 'border-red-200 dark:border-red-500/20' },
   Closed:       { label: 'Closed',       bg: 'bg-slate-100 dark:bg-slate-800',         text: 'text-slate-700 dark:text-slate-400',     border: 'border-slate-200 dark:border-slate-700' },
   Cancelled:    { label: 'Cancelled',    bg: 'bg-gray-50 dark:bg-slate-900',           text: 'text-gray-500 dark:text-slate-500',     border: 'border-gray-200 dark:border-slate-800' },
 }
 
 // ─── Tab list และสถานะที่ TA สามารถเปลี่ยนได้ (ยกเว้น Open) ───
-const STATUS_TABS = ['ทั้งหมด', 'Open', 'Recruiting', 'Interviewing', 'Offering', 'Closed', 'Cancelled']
+const STATUS_TABS = ['ทั้งหมด', 'Open', 'Recruiting', 'Interviewing', 'Offering', 'Rejected', 'Closed', 'Cancelled']
 const TA_STATUSES = ['Open', 'Recruiting', 'Interviewing', 'Offering', 'Closed']
-const ALL_STATUSES = ['Open', 'Recruiting', 'Interviewing', 'Offering', 'Closed', 'Cancelled']
+const ALL_STATUSES = ['Open', 'Recruiting', 'Interviewing', 'Offering', 'Rejected', 'Closed', 'Cancelled']
 
 // คืน list สถานะที่เปลี่ยนได้ → ไม่รวม Open (TA ไม่สามารถย้อนกลับมา Open ได้)
 function getAvailableStatuses(currentStatus) {
@@ -65,6 +66,9 @@ export default function RequestTable({
   const [sortField, setSortField]   = useState('createdAt')
   const [sortDir, setSortDir]       = useState('desc')
   const [confirmState, setConfirmState] = useState({ isOpen: false, action: null, payload: null })
+  // Offering modal: กรอกวันเริ่มงานก่อนเปลี่ยนสถานะเป็น Offering
+  const [offeringModal, setOfferingModal] = useState({ isOpen: false, id: null })
+  const [offeringStartDate, setOfferingStartDate] = useState('')
 
   // ─── Realtime listener: ดึง hc_requests จาก Firestore แบบ realtime ───
   // คำนวณ stats (open/assigned/closed) และส่งกลับผ่าน onStatsChange callback
@@ -117,10 +121,11 @@ export default function RequestTable({
   }
 
   // Auto-assign TA ถ้ายังไม่มีคนรับเคสและเปลี่ยนจาก Open → working status
-  async function handleStatusChange(id, newStatus) {
+  // extraData: ข้อมูลเพิ่มเติม เช่น { startDate } ตอนเปลี่ยนเป็น Offering
+  async function handleStatusChange(id, newStatus, extraData = {}) {
     const req = requests.find((r) => r.id === id)
 
-    const updateData = { status: newStatus }
+    const updateData = { status: newStatus, ...extraData }
 
     // Auto-assign if changing from Open to a working status and not already assigned
     if (req.status === 'Open' && ['Recruiting', 'Interviewing', 'Offering', 'Closed'].includes(newStatus) && !req.assignedTo) {
@@ -129,18 +134,51 @@ export default function RequestTable({
       updateData.assignedAt = serverTimestamp()
     }
 
+    // Rejected → ย้อนกลับเป็น Open เพื่อ recruit ใหม่
+    if (newStatus === 'Rejected') {
+      updateData.status = 'Rejected'
+      updateData.rejectedAt = serverTimestamp()
+    }
+
     await updateDoc(doc(db, 'hc_requests', id), updateData)
     const assignedAt = updateData.assignedAt ? new Date().toISOString() : req.assignedAt?.toDate?.().toISOString()
     sendStatusUpdate(id, newStatus, updateData.assignedToName || req.assignedToName, assignedAt)
     logAudit({
       requestId: id,
-      action: 'StatusChange',
+      action: newStatus === 'Rejected' ? 'Rejected' : 'StatusChange',
       by: user.email,
       byName: user.displayName,
       fromStatus: req?.status,
       toStatus: newStatus,
       position: req?.position,
-      department: req?.department
+      department: req?.department,
+      note: extraData.startDate ? `วันเริ่มงาน: ${extraData.startDate}` : undefined,
+    })
+  }
+
+  // Offering confirm: บันทึกวันเริ่มงาน + เปลี่ยนสถานะ
+  async function handleOfferingConfirm() {
+    if (!offeringStartDate || !offeringModal.id) return
+    await handleStatusChange(offeringModal.id, 'Offering', { startDate: offeringStartDate })
+    setOfferingModal({ isOpen: false, id: null })
+    setOfferingStartDate('')
+  }
+
+  // Rejected → เปิด recruit ใหม่ (ย้อนกลับเป็น Open)
+  async function handleReopen(id) {
+    const req = requests.find((r) => r.id === id)
+    await updateDoc(doc(db, 'hc_requests', id), { status: 'Open', startDate: '', rejectedAt: null })
+    sendStatusUpdate(id, 'Open', req.assignedToName)
+    logAudit({
+      requestId: id,
+      action: 'Reopen',
+      by: user.email,
+      byName: user.displayName,
+      fromStatus: 'Rejected',
+      toStatus: 'Open',
+      position: req?.position,
+      department: req?.department,
+      note: 'ผู้สมัครไม่มารายงานตัว — เปิด recruit ใหม่',
     })
   }
 
@@ -573,21 +611,39 @@ export default function RequestTable({
                             </button>
                           )}
                           {canUpdateStatus && (
-                            <select 
-                              value={req.status} 
+                            <select
+                              value={req.status}
                               onClick={e => e.stopPropagation()}
                               onChange={(e) => {
                                 e.stopPropagation()
-                                if (e.target.value === 'Closed') {
-                                  openConfirm('close', { id: req.id })
-                                  return
-                                }
-                                handleStatusChange(req.id, e.target.value)
+                                const val = e.target.value
+                                if (val === 'Closed') { openConfirm('close', { id: req.id }); return }
+                                // Offering → เปิด modal กรอกวันเริ่มงาน
+                                if (val === 'Offering') { setOfferingModal({ isOpen: true, id: req.id }); return }
+                                handleStatusChange(req.id, val)
                               }}
                               className="text-[10px] font-bold border border-emerald-500/30 rounded-lg px-2 py-1 bg-white dark:bg-slate-900 text-[#008065] dark:text-emerald-400 focus:outline-none cursor-pointer uppercase tracking-tight"
                             >
                               {getAvailableStatuses(req.status).map((s) => <option key={s} value={s}>{s}</option>)}
                             </select>
+                          )}
+                          {/* Offering → Reject: ผู้สมัครไม่มา */}
+                          {isTA && req.status === 'Offering' && (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); handleStatusChange(req.id, 'Rejected') }}
+                              className="flex items-center gap-1.5 px-2.5 py-1 text-red-600 dark:text-red-400 text-[10px] font-bold border border-red-300 dark:border-red-900/30 rounded-lg hover:bg-red-50 dark:hover:bg-red-950/20 transition-all uppercase tracking-tight"
+                            >
+                              <XCircle size={11} strokeWidth={3} /> Reject
+                            </button>
+                          )}
+                          {/* Rejected → Reopen: เปิด recruit ใหม่ */}
+                          {isTA && req.status === 'Rejected' && (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); handleReopen(req.id) }}
+                              className="flex items-center gap-1.5 px-2.5 py-1 text-yellow-700 dark:text-yellow-400 text-[10px] font-bold border border-yellow-300 dark:border-yellow-900/30 rounded-lg hover:bg-yellow-50 dark:hover:bg-yellow-950/20 transition-all uppercase tracking-tight"
+                            >
+                              <UserCheck size={11} strokeWidth={3} /> Recruit ใหม่
+                            </button>
                           )}
                           {canReassign && (
                             reassigningId === req.id ? (
@@ -654,6 +710,14 @@ export default function RequestTable({
                                 </p>
                                 <p className="text-xl font-black text-[#008065] dark:text-emerald-500 tabular-nums">{req.headcount ?? 1} <span className="text-sm font-bold text-gray-400">คน</span></p>
                               </div>
+                              {req.startDate && (
+                                <div>
+                                  <p className="text-[10px] font-black text-gray-400 dark:text-slate-600 uppercase tracking-widest flex items-center gap-1.5 mb-2">
+                                    <Calendar size={12} strokeWidth={3} /> วันเริ่มงาน
+                                  </p>
+                                  <p className="text-sm font-extrabold text-emerald-600 dark:text-emerald-400">{req.startDate}</p>
+                                </div>
+                              )}
                               {req.requestType === 'Replacement' && (
                                 <div>
                                   <p className="text-[10px] font-black text-gray-400 dark:text-slate-600 uppercase tracking-widest flex items-center gap-1.5 mb-2">
@@ -732,6 +796,39 @@ export default function RequestTable({
         onConfirm={handleConfirm}
         {...getConfirmContent()}
       />
+
+      {/* ── Offering Modal: กรอกวันเริ่มงาน ── */}
+      {offeringModal.isOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+          <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-gray-200 dark:border-slate-700 w-full max-w-sm mx-4 p-6">
+            <h3 className="text-lg font-black text-gray-800 dark:text-gray-100 mb-1">Offering</h3>
+            <p className="text-sm text-gray-500 dark:text-slate-400 mb-5">กรุณากรอกวันเริ่มงานของผู้สมัคร</p>
+            <label className="block text-[10px] font-black text-gray-500 dark:text-slate-500 uppercase tracking-widest mb-2">วันเริ่มงาน</label>
+            <input
+              type="date"
+              value={offeringStartDate}
+              onChange={(e) => setOfferingStartDate(e.target.value)}
+              className="w-full px-4 py-2.5 border border-gray-200 dark:border-slate-700 rounded-xl bg-white dark:bg-slate-800 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 text-sm font-medium"
+              autoFocus
+            />
+            <div className="flex gap-3 mt-6">
+              <button
+                onClick={() => { setOfferingModal({ isOpen: false, id: null }); setOfferingStartDate('') }}
+                className="flex-1 px-4 py-2.5 text-sm font-bold rounded-xl border border-gray-200 dark:border-slate-700 text-gray-600 dark:text-slate-400 hover:bg-gray-50 dark:hover:bg-slate-800 transition-colors"
+              >
+                ยกเลิก
+              </button>
+              <button
+                onClick={handleOfferingConfirm}
+                disabled={!offeringStartDate}
+                className="flex-1 px-4 py-2.5 text-sm font-bold rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shadow-md shadow-indigo-500/20"
+              >
+                ยืนยัน Offering
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
