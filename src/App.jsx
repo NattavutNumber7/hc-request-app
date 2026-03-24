@@ -5,8 +5,9 @@ import { auth } from './services/firebase'
 import { fetchSheetsData, getDepartmentByEmail } from './services/sheetsData'
 import { doc, getDoc, getDocs, addDoc, collection, onSnapshot, orderBy, query, setDoc, deleteDoc, updateDoc, deleteField, serverTimestamp, where } from 'firebase/firestore'
 import { db } from './services/firebase'
-import { FolderOpen, FileText, ExternalLink, Clock, Settings2, UserPlus, Trash2, Tag, Search, Plus } from 'lucide-react'
+import { FolderOpen, FileText, ExternalLink, Clock, Settings2, UserPlus, Trash2, Tag, Search, Plus, PowerOff, Power } from 'lucide-react'
 import { listJDFiles, getJDSignedUrl, deleteJDFile } from './services/supabase'
+import { sendMaintenanceAlert } from './services/webhook'
 
 // โหลดทันที — ใช้ทุกหน้า
 import Login from './components/Auth/Login'
@@ -85,6 +86,26 @@ function RoleGuard({ role, allowed, children, redirectTo }) {
   if (!role) return null
   if (allowed.includes(role)) return children
   return <Navigate to={redirectTo} replace />
+}
+
+// ─── Maintenance Mode Page ───────────────────────────────────────────────────
+function MaintenancePage({ message }) {
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-[#f5f7f6] dark:bg-slate-950 px-6">
+      <div className="text-center flex flex-col items-center gap-6 max-w-md">
+        <div className="w-20 h-20 rounded-3xl bg-orange-100 dark:bg-orange-500/10 flex items-center justify-center">
+          <PowerOff size={36} className="text-orange-500" />
+        </div>
+        <div>
+          <h1 className="text-2xl font-black text-gray-800 dark:text-gray-100 tracking-tight">ระบบปิดปรับปรุง</h1>
+          <p className="text-gray-500 dark:text-slate-400 mt-2 text-sm leading-relaxed">
+            {message || 'กำลังดำเนินการปรับปรุงระบบ กรุณารอสักครู่แล้วลองใหม่อีกครั้ง'}
+          </p>
+        </div>
+        <p className="text-xs text-gray-400 dark:text-slate-600 font-mono">HC Request System — Maintenance Mode</p>
+      </div>
+    </div>
+  )
 }
 
 // ─── Pages ──────────────────────────────────────────────────────────────────
@@ -872,6 +893,9 @@ export default function App() {
   const [isDarkMode, setIsDarkMode] = useState(() => {
     return localStorage.getItem('theme') === 'dark'
   })
+  const [maintenanceMode, setMaintenanceMode] = useState(false)
+  const [maintenanceMessage, setMaintenanceMessage] = useState('')
+  const [togglingMaintenance, setTogglingMaintenance] = useState(false)
 
   // ─── Sync dark mode กับ localStorage และ class ที่ html element ───
   useEffect(() => {
@@ -888,6 +912,36 @@ export default function App() {
       localStorage.setItem('theme', newVal ? 'dark' : 'light')
       return newVal
     })
+  }
+
+  // ─── Realtime listener: อ่านสถานะ maintenance จาก Firestore ───
+  useEffect(() => {
+    const ref = doc(db, 'settings', 'maintenance')
+    return onSnapshot(ref, (snap) => {
+      if (snap.exists()) {
+        setMaintenanceMode(snap.data().active ?? false)
+        setMaintenanceMessage(snap.data().message ?? '')
+      }
+    })
+  }, [])
+
+  // Admin: toggle maintenance mode → เขียน Firestore + แจ้ง Slack
+  async function toggleMaintenance() {
+    if (togglingMaintenance) return
+    setTogglingMaintenance(true)
+    const next = !maintenanceMode
+    try {
+      await setDoc(doc(db, 'settings', 'maintenance'), {
+        active: next,
+        message: next ? 'กำลังดำเนินการปรับปรุงระบบ กรุณารอสักครู่' : '',
+        updatedAt: serverTimestamp(),
+        updatedBy: user?.email,
+      })
+      await sendMaintenanceAlert(next)
+    } catch (e) {
+      console.error('[toggleMaintenance] error:', e)
+    }
+    setTogglingMaintenance(false)
   }
 
   // ─── ตรวจสอบสถานะ login และดึง role ของ user จาก Firestore ───
@@ -932,6 +986,11 @@ export default function App() {
   }
 
   if (!user) return <Login />
+
+  // แสดงหน้า maintenance ให้ non-admin เมื่อระบบปิดปรับปรุง
+  if (maintenanceMode && role !== 'admin') {
+    return <MaintenancePage message={maintenanceMessage} />
+  }
 
   const defaultRoute = role === 'manager' ? '/my-requests' : '/dashboard'
   const pageProps = { user, role, department, isDarkMode, toggleDarkMode }
@@ -1011,12 +1070,34 @@ export default function App() {
       </Routes>
 
       {user?.email === DEV_EMAIL && (
-        <RoleSwitcher 
-          currentRole={role} 
-          onSwitch={setRole} 
+        <RoleSwitcher
+          currentRole={role}
+          onSwitch={setRole}
           currentDept={department}
           onDeptSwitch={setDepartment}
         />
+      )}
+
+      {/* Admin: ปุ่มเปิด/ปิดระบบ — แสดงเฉพาะ admin */}
+      {role === 'admin' && (
+        <div className="fixed bottom-6 left-6 z-[100]">
+          <button
+            onClick={toggleMaintenance}
+            disabled={togglingMaintenance}
+            title={maintenanceMode ? 'เปิดระบบ' : 'ปิดระบบเพื่อปรับปรุง'}
+            className={`flex items-center gap-2 px-4 py-2.5 rounded-2xl text-sm font-bold shadow-xl transition-all disabled:opacity-50 ${
+              maintenanceMode
+                ? 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-500/30'
+                : 'bg-orange-500 hover:bg-orange-600 text-white shadow-orange-500/30'
+            }`}
+          >
+            {maintenanceMode ? <Power size={15} /> : <PowerOff size={15} />}
+            {togglingMaintenance ? 'กำลังดำเนินการ...' : maintenanceMode ? 'เปิดระบบ' : 'ปิดระบบ'}
+          </button>
+          {maintenanceMode && (
+            <p className="text-[10px] text-orange-500 font-bold mt-1.5 text-center">ระบบปิดอยู่</p>
+          )}
+        </div>
       )}
     </>
   )

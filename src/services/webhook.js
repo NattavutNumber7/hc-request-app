@@ -16,6 +16,17 @@ const DATA_URL = import.meta.env.VITE_GAS_DATA_URL
  * อัพเดต Status ใน Google Sheets เมื่อมีการเปลี่ยนแปลงใน Web App
  * ใช้ DATA_URL (doGet) แทน WEBHOOK_URL เพราะ updateStatus handler อยู่ใน doGet
  */
+// แจ้ง Slack ทั้ง 2 channel ผ่าน GAS เมื่อ admin เปิด/ปิดระบบ
+export async function sendMaintenanceAlert(active) {
+  if (!DATA_URL) return
+  try {
+    const params = new URLSearchParams({ action: 'maintenance', active: active.toString() })
+    await fetch(`${DATA_URL}?${params.toString()}`)
+  } catch (err) {
+    console.error('[sendMaintenanceAlert] error:', err)
+  }
+}
+
 export async function sendStatusUpdate(docId, status, assignedToName = null, assignedAt = null, startDate = null) {
   if (!DATA_URL) {
     console.error('[sendStatusUpdate] VITE_GAS_DATA_URL not configured')
