@@ -1,10 +1,10 @@
-import { Inbox, UserCheck, CheckCircle, Clock, Timer } from 'lucide-react'
+import { Inbox, UserCheck, CheckCircle, Clock, Timer, FileCheck, CalendarClock } from 'lucide-react'
 
 const STAT_CONFIG = [
   {
     key: 'open',
     label: 'Open',
-    labelTh: 'รออนุมัติ',
+    labelTh: 'รอดำเนินการ',
     icon: Inbox,
     color: 'text-yellow-600 dark:text-yellow-500',
     bg: 'bg-yellow-50 dark:bg-yellow-500/10',
@@ -13,11 +13,29 @@ const STAT_CONFIG = [
   {
     key: 'assigned',
     label: 'In Progress',
-    labelTh: 'กำลังดำเนินการ',
+    labelTh: 'กำลัง Recruit',
     icon: UserCheck,
     color: 'text-blue-600 dark:text-blue-500',
     bg: 'bg-blue-50 dark:bg-blue-500/10',
     border: 'border-blue-200 dark:border-blue-500/20',
+  },
+  {
+    key: 'offering',
+    label: 'Offering',
+    labelTh: 'รอตอบรับ Offer',
+    icon: FileCheck,
+    color: 'text-indigo-600 dark:text-indigo-400',
+    bg: 'bg-indigo-50 dark:bg-indigo-500/10',
+    border: 'border-indigo-200 dark:border-indigo-500/20',
+  },
+  {
+    key: 'onboarding',
+    label: 'Onboarding',
+    labelTh: 'รอเริ่มงาน',
+    icon: CalendarClock,
+    color: 'text-teal-600 dark:text-teal-400',
+    bg: 'bg-teal-50 dark:bg-teal-500/10',
+    border: 'border-teal-200 dark:border-teal-500/20',
   },
   {
     key: 'closed',
@@ -51,7 +69,7 @@ const STAT_CONFIG = [
 
 export default function StatCards({ stats }) {
   return (
-    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+    <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
       {STAT_CONFIG.map((card) => {
         const value = stats[card.key]
         const display = value === null || value === undefined

@@ -13,15 +13,16 @@ const STATUS_CONFIG = {
   Recruiting:   { label: 'Recruiting',   bg: 'bg-emerald-50 dark:bg-emerald-500/10',   text: 'text-emerald-700 dark:text-emerald-500', border: 'border-emerald-200 dark:border-emerald-500/20' },
   Interviewing: { label: 'Interviewing', bg: 'bg-orange-50 dark:bg-orange-500/10',     text: 'text-orange-700 dark:text-orange-500',   border: 'border-orange-200 dark:border-orange-500/20' },
   Offering:     { label: 'Offering',     bg: 'bg-indigo-50 dark:bg-indigo-500/10',     text: 'text-indigo-700 dark:text-indigo-500',   border: 'border-indigo-200 dark:border-indigo-500/20' },
+  Onboarding:   { label: 'Onboarding',   bg: 'bg-teal-50 dark:bg-teal-500/10',         text: 'text-teal-700 dark:text-teal-500',       border: 'border-teal-200 dark:border-teal-500/20' },
   Rejected:     { label: 'Rejected',     bg: 'bg-red-50 dark:bg-red-500/10',           text: 'text-red-700 dark:text-red-500',         border: 'border-red-200 dark:border-red-500/20' },
   Closed:       { label: 'Closed',       bg: 'bg-slate-100 dark:bg-slate-800',         text: 'text-slate-700 dark:text-slate-400',     border: 'border-slate-200 dark:border-slate-700' },
   Cancelled:    { label: 'Cancelled',    bg: 'bg-gray-50 dark:bg-slate-900',           text: 'text-gray-500 dark:text-slate-500',     border: 'border-gray-200 dark:border-slate-800' },
 }
 
 // ─── Tab list และสถานะที่ TA สามารถเปลี่ยนได้ (ยกเว้น Open) ───
-const STATUS_TABS = ['ทั้งหมด', 'Open', 'Recruiting', 'Interviewing', 'Offering', 'Rejected', 'Closed', 'Cancelled']
-const TA_STATUSES = ['Open', 'Recruiting', 'Interviewing', 'Offering', 'Closed']
-const ALL_STATUSES = ['Open', 'Recruiting', 'Interviewing', 'Offering', 'Rejected', 'Closed', 'Cancelled']
+const STATUS_TABS = ['ทั้งหมด', 'Open', 'Recruiting', 'Interviewing', 'Offering', 'Onboarding', 'Rejected', 'Closed', 'Cancelled']
+const TA_STATUSES = ['Open', 'Recruiting', 'Interviewing', 'Offering', 'Onboarding', 'Closed']
+const ALL_STATUSES = ['Open', 'Recruiting', 'Interviewing', 'Offering', 'Onboarding', 'Rejected', 'Closed', 'Cancelled']
 
 // คืน list สถานะที่เปลี่ยนได้ → ไม่รวม Open (TA ไม่สามารถย้อนกลับมา Open ได้)
 function getAvailableStatuses(currentStatus) {
@@ -118,10 +119,12 @@ export default function RequestTable({
         : null
       onStatsChange?.(
         {
-          open:         active.filter((r) => r.status === 'Open').length,
-          assigned:     active.filter((r) => ['Recruiting', 'Interviewing', 'Offering'].includes(r.status)).length,
-          closed:       active.filter((r) => r.status === 'Closed').length,
-          total:        active.length,
+          open:       active.filter((r) => r.status === 'Open').length,
+          assigned:   active.filter((r) => ['Recruiting', 'Interviewing'].includes(r.status)).length,
+          offering:   active.filter((r) => r.status === 'Offering').length,
+          onboarding: active.filter((r) => r.status === 'Onboarding').length,
+          closed:     active.filter((r) => r.status === 'Closed').length,
+          total:      active.length,
           avgDaysToFill,
         },
         data
