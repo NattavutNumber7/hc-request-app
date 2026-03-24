@@ -145,7 +145,7 @@ function PositionCombobox({ value, onChange, positions, required }) {
   )
 }
 
-export default function HCRequestForm({ user, role }) {
+export default function HCRequestForm({ user, role, maintenanceMode = false }) {
   const feedbackTopRef = useRef(null)
   const [form, setForm] = useState(INITIAL_FORM)
   const [loading, setLoading] = useState(false)
@@ -325,7 +325,7 @@ export default function HCRequestForm({ user, role }) {
         setCustomPositions((prev) => [...prev, customDoc])
       }
 
-      await sendToWebhook({ ...payload, id: docRef.id, createdAt: new Date().toISOString() })
+      await sendToWebhook({ ...payload, id: docRef.id, createdAt: new Date().toISOString(), maintenance: maintenanceMode })
       logAudit({
         requestId:  docRef.id,
         action:     'Submit',
