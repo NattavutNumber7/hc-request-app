@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo, Fragment } from 'react'
-import { collection, onSnapshot, orderBy, query, doc, updateDoc, getDocs, where, deleteDoc, serverTimestamp } from 'firebase/firestore'
+import { collection, onSnapshot, orderBy, query, doc, updateDoc, getDocs, where, deleteDoc, serverTimestamp, arrayUnion } from 'firebase/firestore'
 import { db } from '../../services/firebase'
 import { sendStatusUpdate } from '../../services/webhook'
 import { logAudit } from '../../services/auditLog'
@@ -37,6 +37,38 @@ function StatusBadge({ status }) {
       {cfg.label}
     </span>
   )
+}
+
+// ─── คำนวณวันที่ใช้ตั้งแต่ Open จนถึงปัจจุบัน (หรือ closedAt) ───
+function getDaysOpen(req) {
+  const created = req.createdAt?.toDate?.()
+  if (!created) return null
+  const end = req.closedAt?.toDate?.() || new Date()
+  return Math.floor((end - created) / (1000 * 60 * 60 * 24))
+}
+
+// แสดงป้าย SLA: 🔴 >30วัน 🟡 15-30วัน 🟢 <15วัน
+function SLABadge({ req }) {
+  const days = getDaysOpen(req)
+  if (days === null) return null
+  const done = ['Closed', 'Cancelled'].includes(req.status)
+  if (done) return <span className="text-[10px] text-slate-400 dark:text-slate-600 font-mono">{days}d</span>
+  const style = days > 30
+    ? 'text-red-600 bg-red-50 dark:bg-red-500/10 border-red-200 dark:border-red-500/20'
+    : days > 15
+    ? 'text-yellow-600 bg-yellow-50 dark:bg-yellow-500/10 border-yellow-200 dark:border-yellow-500/20'
+    : 'text-emerald-600 bg-emerald-50 dark:bg-emerald-500/10 border-emerald-200 dark:border-emerald-500/20'
+  const dot = days > 30 ? '🔴' : days > 15 ? '🟡' : '🟢'
+  return (
+    <span className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-lg text-[10px] font-bold border ${style}`}>
+      {dot} {days}d
+    </span>
+  )
+}
+
+// สร้าง entry สำหรับ statusHistory array
+function buildHistoryEntry(status, user) {
+  return { status, changedAt: new Date().toISOString(), changedBy: user.email, changedByName: user.displayName }
 }
 
 function SortIcon({ field, sortField, sortDir }) {
@@ -79,12 +111,18 @@ export default function RequestTable({
       setRequests(data)
       setLoading(false)
       const active = data.filter((r) => r.status !== 'Cancelled')
+      // คำนวณ Average Days to Fill จาก request ที่ Closed และมี closedAt
+      const closedWithDate = data.filter(r => r.status === 'Closed' && r.createdAt && r.closedAt)
+      const avgDaysToFill = closedWithDate.length > 0
+        ? Math.round(closedWithDate.reduce((sum, r) => sum + getDaysOpen(r), 0) / closedWithDate.length)
+        : null
       onStatsChange?.(
         {
-          open:     active.filter((r) => r.status === 'Open').length,
-          assigned: active.filter((r) => ['Recruiting', 'Interviewing', 'Offering'].includes(r.status)).length,
-          closed:   active.filter((r) => r.status === 'Closed').length,
-          total:    active.length,
+          open:         active.filter((r) => r.status === 'Open').length,
+          assigned:     active.filter((r) => ['Recruiting', 'Interviewing', 'Offering'].includes(r.status)).length,
+          closed:       active.filter((r) => r.status === 'Closed').length,
+          total:        active.length,
+          avgDaysToFill,
         },
         data
       )
@@ -105,7 +143,7 @@ export default function RequestTable({
   async function handleCancel(id) {
     setUpdating(id)
     const req = requests.find((r) => r.id === id)
-    await updateDoc(doc(db, 'hc_requests', id), { status: 'Cancelled' })
+    await updateDoc(doc(db, 'hc_requests', id), { status: 'Cancelled', statusHistory: arrayUnion(buildHistoryEntry('Cancelled', user)) })
     sendStatusUpdate(id, 'Cancelled')
     logAudit({ requestId: id, action: 'Cancel', by: user.email, byName: user.displayName, fromStatus: req?.status, toStatus: 'Cancelled', position: req?.position, department: req?.department })
     setUpdating(null)
@@ -114,7 +152,7 @@ export default function RequestTable({
   async function handleClaim(id) {
     setUpdating(id)
     const req = requests.find((r) => r.id === id)
-    await updateDoc(doc(db, 'hc_requests', id), { status: 'Recruiting', assignedTo: user.email, assignedToName: user.displayName, assignedAt: serverTimestamp() })
+    await updateDoc(doc(db, 'hc_requests', id), { status: 'Recruiting', assignedTo: user.email, assignedToName: user.displayName, assignedAt: serverTimestamp(), statusHistory: arrayUnion(buildHistoryEntry('Recruiting', user)) })
     sendStatusUpdate(id, 'Recruiting', user.displayName, new Date().toISOString())
     logAudit({ requestId: id, action: 'Assign', by: user.email, byName: user.displayName, fromStatus: req?.status, toStatus: 'Recruiting', position: req?.position, department: req?.department })
     setUpdating(null)
@@ -125,7 +163,11 @@ export default function RequestTable({
   async function handleStatusChange(id, newStatus, extraData = {}) {
     const req = requests.find((r) => r.id === id)
 
-    const updateData = { status: newStatus, ...extraData }
+    const updateData = {
+      status: newStatus,
+      ...extraData,
+      statusHistory: arrayUnion(buildHistoryEntry(newStatus, user)),
+    }
 
     // Auto-assign if changing from Open to a working status and not already assigned
     if (req.status === 'Open' && ['Recruiting', 'Interviewing', 'Offering', 'Closed'].includes(newStatus) && !req.assignedTo) {
@@ -134,11 +176,9 @@ export default function RequestTable({
       updateData.assignedAt = serverTimestamp()
     }
 
-    // Rejected → ย้อนกลับเป็น Open เพื่อ recruit ใหม่
-    if (newStatus === 'Rejected') {
-      updateData.status = 'Rejected'
-      updateData.rejectedAt = serverTimestamp()
-    }
+    // บันทึก rejectedAt / closedAt เพื่อใช้คำนวณ SLA
+    if (newStatus === 'Rejected') updateData.rejectedAt = serverTimestamp()
+    if (newStatus === 'Closed')   updateData.closedAt   = serverTimestamp()
 
     await updateDoc(doc(db, 'hc_requests', id), updateData)
     const assignedAt = updateData.assignedAt ? new Date().toISOString() : req.assignedAt?.toDate?.().toISOString()
@@ -167,7 +207,7 @@ export default function RequestTable({
   // Rejected → เปิด recruit ใหม่ (ย้อนกลับเป็น Open)
   async function handleReopen(id) {
     const req = requests.find((r) => r.id === id)
-    await updateDoc(doc(db, 'hc_requests', id), { status: 'Open', startDate: '', rejectedAt: null })
+    await updateDoc(doc(db, 'hc_requests', id), { status: 'Open', startDate: '', rejectedAt: null, statusHistory: arrayUnion(buildHistoryEntry('Open', user)) })
     sendStatusUpdate(id, 'Open', req.assignedToName)
     logAudit({
       requestId: id,
@@ -521,6 +561,7 @@ export default function RequestTable({
                   { label: 'TA', field: 'assignedToName' },
                   { label: 'สถานะ', field: 'status' },
                   { label: 'วันที่ยื่น', field: 'createdAt' },
+                  { label: 'SLA', field: null },
                   { label: 'Actions', field: null },
                 ].map(({ label, field }) => (
                     <th
@@ -592,6 +633,9 @@ export default function RequestTable({
                       <td className="px-4 py-3 whitespace-nowrap"><StatusBadge status={req.status} /></td>
                       <td className="px-4 py-3 text-gray-400 dark:text-slate-600 text-[11px] font-medium font-mono whitespace-nowrap">
                         {req.createdAt?.toDate?.().toLocaleDateString('th-TH') ?? '—'}
+                      </td>
+                      <td className="px-4 py-3 whitespace-nowrap">
+                        <SLABadge req={req} />
                       </td>
                       <td className="px-4 py-3" onClick={e => e.stopPropagation()}>
                         <div className="flex items-center gap-2 flex-wrap">

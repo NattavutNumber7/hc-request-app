@@ -1,4 +1,4 @@
-import { Inbox, UserCheck, CheckCircle, Clock } from 'lucide-react'
+import { Inbox, UserCheck, CheckCircle, Clock, Timer } from 'lucide-react'
 
 const STAT_CONFIG = [
   {
@@ -37,24 +37,40 @@ const STAT_CONFIG = [
     bg: 'bg-slate-50 dark:bg-slate-800/50',
     border: 'border-slate-200 dark:border-slate-800',
   },
+  {
+    key: 'avgDaysToFill',
+    label: 'Avg Fill Time',
+    labelTh: 'เฉลี่ยวันปิดเคส',
+    icon: Timer,
+    color: 'text-purple-600 dark:text-purple-400',
+    bg: 'bg-purple-50 dark:bg-purple-500/10',
+    border: 'border-purple-200 dark:border-purple-500/20',
+    suffix: ' วัน',
+  },
 ]
 
 export default function StatCards({ stats }) {
   return (
-    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-      {STAT_CONFIG.map((card) => (
-        <div
-          key={card.key}
-          className={`rounded-xl border ${card.border} ${card.bg} p-5 flex flex-col gap-2 transition-colors`}
-        >
-          <div className="flex items-center justify-between">
-            <span className="text-sm text-slate-500 dark:text-slate-400 font-medium">{card.label}</span>
-            <card.icon size={18} className={card.color} />
+    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+      {STAT_CONFIG.map((card) => {
+        const value = stats[card.key]
+        const display = value === null || value === undefined
+          ? card.key === 'avgDaysToFill' ? '—' : '0'
+          : `${value}${card.suffix ?? ''}`
+        return (
+          <div
+            key={card.key}
+            className={`rounded-xl border ${card.border} ${card.bg} p-5 flex flex-col gap-2 transition-colors`}
+          >
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-slate-500 dark:text-slate-400 font-medium">{card.label}</span>
+              <card.icon size={18} className={card.color} />
+            </div>
+            <p className={`text-4xl font-black tracking-tight ${card.color}`}>{display}</p>
+            <p className="text-xs text-slate-400 dark:text-slate-500 uppercase font-semibold tracking-wider font-mono">{card.labelTh}</p>
           </div>
-          <p className={`text-4xl font-black tracking-tight ${card.color}`}>{stats[card.key] ?? 0}</p>
-          <p className="text-xs text-slate-400 dark:text-slate-500 uppercase font-semibold tracking-wider font-mono">{card.labelTh}</p>
-        </div>
-      ))}
+        )
+      })}
     </div>
   )
 }

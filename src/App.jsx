@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, lazy, Suspense } from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { onAuthStateChanged } from 'firebase/auth'
 import { auth } from './services/firebase'
@@ -8,13 +8,16 @@ import { db } from './services/firebase'
 import { FolderOpen, FileText, ExternalLink, Clock, Settings2, UserPlus, Trash2, Tag, Search, Plus } from 'lucide-react'
 import { listJDFiles, getJDSignedUrl, deleteJDFile } from './services/supabase'
 
+// โหลดทันที — ใช้ทุกหน้า
 import Login from './components/Auth/Login'
 import NavBar from './components/Shared/NavBar'
 import ConfirmModal from './components/Shared/ConfirmModal'
 import StatCards from './components/Dashboard/StatCards'
 import RequestTable from './components/Dashboard/RequestTable'
 import MonthlyPipeline from './components/Dashboard/MonthlyPipeline'
-import HCRequestForm from './components/Forms/HCRequestForm'
+
+// Lazy load — โหลดเฉพาะตอนเปิดหน้านั้น
+const HCRequestForm = lazy(() => import('./components/Forms/HCRequestForm'))
 
 const DEV_EMAIL = import.meta.env.VITE_DEV_EMAIL
 
@@ -117,7 +120,9 @@ function FormPage({ user, role, isDarkMode, toggleDarkMode }) {
           <h1 className="text-xl font-bold text-gray-800 dark:text-gray-100 italic tracking-tight">ยื่นคำขออัตรากำลัง</h1>
           <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">กรอกข้อมูลให้ครบถ้วน แล้วกด "ยื่นคำขอ"</p>
         </div>
-        <HCRequestForm user={user} role={role} />
+        <Suspense fallback={<div className="flex items-center justify-center py-20 text-gray-400 text-sm">กำลังโหลดฟอร์ม...</div>}>
+          <HCRequestForm user={user} role={role} />
+        </Suspense>
       </div>
     </Layout>
   )
