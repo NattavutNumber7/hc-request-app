@@ -13,7 +13,7 @@ const STATUS_CONFIG = {
   Recruiting:   { label: 'Recruiting',   bg: 'bg-emerald-50 dark:bg-emerald-500/10',   text: 'text-emerald-700 dark:text-emerald-500', border: 'border-emerald-200 dark:border-emerald-500/20' },
   Interviewing: { label: 'Interviewing', bg: 'bg-orange-50 dark:bg-orange-500/10',     text: 'text-orange-700 dark:text-orange-500',   border: 'border-orange-200 dark:border-orange-500/20' },
   Offering:     { label: 'Offering',     bg: 'bg-indigo-50 dark:bg-indigo-500/10',     text: 'text-indigo-700 dark:text-indigo-500',   border: 'border-indigo-200 dark:border-indigo-500/20' },
-  Onboarding:   { label: 'Onboarding',   bg: 'bg-teal-50 dark:bg-teal-500/10',         text: 'text-teal-700 dark:text-teal-500',       border: 'border-teal-200 dark:border-teal-500/20' },
+  Onboarding:   { label: 'W.Onboarding', bg: 'bg-teal-50 dark:bg-teal-500/10',         text: 'text-teal-700 dark:text-teal-500',       border: 'border-teal-200 dark:border-teal-500/20' },
   Rejected:     { label: 'Rejected',     bg: 'bg-red-50 dark:bg-red-500/10',           text: 'text-red-700 dark:text-red-500',         border: 'border-red-200 dark:border-red-500/20' },
   Closed:       { label: 'Closed',       bg: 'bg-slate-100 dark:bg-slate-800',         text: 'text-slate-700 dark:text-slate-400',     border: 'border-slate-200 dark:border-slate-700' },
   Cancelled:    { label: 'Cancelled',    bg: 'bg-gray-50 dark:bg-slate-900',           text: 'text-gray-500 dark:text-slate-500',     border: 'border-gray-200 dark:border-slate-800' },
@@ -202,7 +202,7 @@ export default function RequestTable({
   // Offering confirm: บันทึกวันเริ่มงาน + เปลี่ยนสถานะ
   async function handleOfferingConfirm() {
     if (!offeringStartDate || !offeringModal.id) return
-    await handleStatusChange(offeringModal.id, 'Offering', { startDate: offeringStartDate })
+    await handleStatusChange(offeringModal.id, 'Onboarding', { startDate: offeringStartDate })
     setOfferingModal({ isOpen: false, id: null })
     setOfferingStartDate('')
   }
@@ -666,7 +666,7 @@ export default function RequestTable({
                                 const val = e.target.value
                                 if (val === 'Closed') { openConfirm('close', { id: req.id }); return }
                                 // Offering → เปิด modal กรอกวันเริ่มงาน
-                                if (val === 'Offering') { setOfferingModal({ isOpen: true, id: req.id }); return }
+                                if (val === 'Onboarding') { setOfferingModal({ isOpen: true, id: req.id }); return }
                                 handleStatusChange(req.id, val)
                               }}
                               className="text-[10px] font-bold border border-emerald-500/30 rounded-lg px-2 py-1 bg-white dark:bg-slate-900 text-[#008065] dark:text-emerald-400 focus:outline-none cursor-pointer uppercase tracking-tight"
@@ -848,7 +848,7 @@ export default function RequestTable({
       {offeringModal.isOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
           <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-gray-200 dark:border-slate-700 w-full max-w-sm mx-4 p-6">
-            <h3 className="text-lg font-black text-gray-800 dark:text-gray-100 mb-1">Offering</h3>
+            <h3 className="text-lg font-black text-gray-800 dark:text-gray-100 mb-1">Waiting Onboarding</h3>
             <p className="text-sm text-gray-500 dark:text-slate-400 mb-5">กรุณากรอกวันเริ่มงานของผู้สมัคร</p>
             <label className="block text-[10px] font-black text-gray-500 dark:text-slate-500 uppercase tracking-widest mb-2">วันเริ่มงาน</label>
             <input
@@ -868,9 +868,9 @@ export default function RequestTable({
               <button
                 onClick={handleOfferingConfirm}
                 disabled={!offeringStartDate}
-                className="flex-1 px-4 py-2.5 text-sm font-bold rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shadow-md shadow-indigo-500/20"
+                className="flex-1 px-4 py-2.5 text-sm font-bold rounded-xl bg-teal-600 text-white hover:bg-teal-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shadow-md shadow-teal-500/20"
               >
-                ยืนยัน Offering
+                ยืนยัน Onboarding
               </button>
             </div>
           </div>

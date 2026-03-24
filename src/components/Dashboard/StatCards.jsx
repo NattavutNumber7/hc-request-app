@@ -30,7 +30,7 @@ const STAT_CONFIG = [
   },
   {
     key: 'onboarding',
-    label: 'Onboarding',
+    label: 'W.Onboarding',
     labelTh: 'รอเริ่มงาน',
     icon: CalendarClock,
     color: 'text-teal-600 dark:text-teal-400',
