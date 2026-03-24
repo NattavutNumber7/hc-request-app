@@ -3,7 +3,7 @@ import { Routes, Route, Navigate } from 'react-router-dom'
 import { onAuthStateChanged } from 'firebase/auth'
 import { auth } from './services/firebase'
 import { fetchSheetsData, getDepartmentByEmail } from './services/sheetsData'
-import { doc, getDoc, getDocs, addDoc, collection, onSnapshot, orderBy, query, setDoc, deleteDoc, updateDoc, deleteField, serverTimestamp, where } from 'firebase/firestore'
+import { doc, getDoc, getDocs, addDoc, collection, onSnapshot, orderBy, query, setDoc, deleteDoc, updateDoc, deleteField, serverTimestamp, where, limit } from 'firebase/firestore'
 import { db } from './services/firebase'
 import { FolderOpen, FileText, ExternalLink, Clock, Settings2, UserPlus, Trash2, Tag, Search, Plus, PowerOff, Power } from 'lucide-react'
 import { listJDFiles, getJDSignedUrl, deleteJDFile } from './services/supabase'
@@ -568,12 +568,11 @@ function AuditLogPage({ user, role, isDarkMode, toggleDarkMode }) {
   const [logError, setLogError] = useState('')
 
   useEffect(() => {
-    const q = query(collection(db, 'hc_logs'), orderBy('timestamp', 'desc'))
-    const unsub = onSnapshot(q, (snap) => {
+    const q = query(collection(db, 'hc_logs'), orderBy('timestamp', 'desc'), limit(500))
+    getDocs(q).then((snap) => {
       setLogs(snap.docs.map((d) => ({ id: d.id, ...d.data() })))
       setLoading(false)
     })
-    return () => unsub()
   }, [])
 
   async function handleDeleteLog(logId) {
@@ -705,11 +704,10 @@ function CustomPositionsPage({ user, role, isDarkMode, toggleDarkMode }) {
 
   useEffect(() => {
     const q = query(collection(db, 'custom_positions'), orderBy('createdAt', 'desc'))
-    const unsub = onSnapshot(q, (snap) => {
+    getDocs(q).then((snap) => {
       setPositions(snap.docs.map(d => ({ id: d.id, ...d.data() })))
       setLoading(false)
     })
-    return () => unsub()
   }, [])
 
   async function handleDelete(id) {

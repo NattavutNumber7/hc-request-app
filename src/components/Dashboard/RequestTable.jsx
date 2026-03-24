@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo, Fragment } from 'react'
-import { collection, onSnapshot, orderBy, query, doc, updateDoc, getDocs, where, deleteDoc, serverTimestamp, arrayUnion } from 'firebase/firestore'
+import { collection, onSnapshot, orderBy, query, doc, updateDoc, getDocs, where, deleteDoc, serverTimestamp, arrayUnion, limit } from 'firebase/firestore'
 import { db } from '../../services/firebase'
 import { sendStatusUpdate } from '../../services/webhook'
 import { logAudit } from '../../services/auditLog'
@@ -9,14 +9,14 @@ import ConfirmModal from '../Shared/ConfirmModal'
 
 // ─── สี Badge ของแต่ละสถานะ (light + dark mode) ───
 const STATUS_CONFIG = {
-  Open:         { label: 'Open',         bg: 'bg-yellow-50 dark:bg-yellow-500/10',     text: 'text-yellow-700 dark:text-yellow-500',   border: 'border-yellow-200 dark:border-yellow-500/20' },
-  Recruiting:   { label: 'Recruiting',   bg: 'bg-emerald-50 dark:bg-emerald-500/10',   text: 'text-emerald-700 dark:text-emerald-500', border: 'border-emerald-200 dark:border-emerald-500/20' },
-  Interviewing: { label: 'Interviewing', bg: 'bg-orange-50 dark:bg-orange-500/10',     text: 'text-orange-700 dark:text-orange-500',   border: 'border-orange-200 dark:border-orange-500/20' },
-  Offering:     { label: 'Offering',     bg: 'bg-indigo-50 dark:bg-indigo-500/10',     text: 'text-indigo-700 dark:text-indigo-500',   border: 'border-indigo-200 dark:border-indigo-500/20' },
-  Onboarding:   { label: 'W.Onboarding', bg: 'bg-teal-50 dark:bg-teal-500/10',         text: 'text-teal-700 dark:text-teal-500',       border: 'border-teal-200 dark:border-teal-500/20' },
-  Rejected:     { label: 'Rejected',     bg: 'bg-red-50 dark:bg-red-500/10',           text: 'text-red-700 dark:text-red-500',         border: 'border-red-200 dark:border-red-500/20' },
-  Closed:       { label: 'Closed',       bg: 'bg-slate-100 dark:bg-slate-800',         text: 'text-slate-700 dark:text-slate-400',     border: 'border-slate-200 dark:border-slate-700' },
-  Cancelled:    { label: 'Cancelled',    bg: 'bg-gray-50 dark:bg-slate-900',           text: 'text-gray-500 dark:text-slate-500',     border: 'border-gray-200 dark:border-slate-800' },
+  Open: { label: 'Open', bg: 'bg-yellow-50 dark:bg-yellow-500/10', text: 'text-yellow-700 dark:text-yellow-500', border: 'border-yellow-200 dark:border-yellow-500/20' },
+  Recruiting: { label: 'Recruiting', bg: 'bg-emerald-50 dark:bg-emerald-500/10', text: 'text-emerald-700 dark:text-emerald-500', border: 'border-emerald-200 dark:border-emerald-500/20' },
+  Interviewing: { label: 'Interviewing', bg: 'bg-orange-50 dark:bg-orange-500/10', text: 'text-orange-700 dark:text-orange-500', border: 'border-orange-200 dark:border-orange-500/20' },
+  Offering: { label: 'Offering', bg: 'bg-indigo-50 dark:bg-indigo-500/10', text: 'text-indigo-700 dark:text-indigo-500', border: 'border-indigo-200 dark:border-indigo-500/20' },
+  Onboarding: { label: 'W.Onboarding', bg: 'bg-teal-50 dark:bg-teal-500/10', text: 'text-teal-700 dark:text-teal-500', border: 'border-teal-200 dark:border-teal-500/20' },
+  Rejected: { label: 'Rejected', bg: 'bg-red-50 dark:bg-red-500/10', text: 'text-red-700 dark:text-red-500', border: 'border-red-200 dark:border-red-500/20' },
+  Closed: { label: 'Closed', bg: 'bg-slate-100 dark:bg-slate-800', text: 'text-slate-700 dark:text-slate-400', border: 'border-slate-200 dark:border-slate-700' },
+  Cancelled: { label: 'Cancelled', bg: 'bg-gray-50 dark:bg-slate-900', text: 'text-gray-500 dark:text-slate-500', border: 'border-gray-200 dark:border-slate-800' },
 }
 
 // ─── Tab list และสถานะที่ TA สามารถเปลี่ยนได้ (ยกเว้น Open) ───
@@ -57,8 +57,8 @@ function SLABadge({ req }) {
   const style = days > 30
     ? 'text-red-600 bg-red-50 dark:bg-red-500/10 border-red-200 dark:border-red-500/20'
     : days > 15
-    ? 'text-yellow-600 bg-yellow-50 dark:bg-yellow-500/10 border-yellow-200 dark:border-yellow-500/20'
-    : 'text-emerald-600 bg-emerald-50 dark:bg-emerald-500/10 border-emerald-200 dark:border-emerald-500/20'
+      ? 'text-yellow-600 bg-yellow-50 dark:bg-yellow-500/10 border-yellow-200 dark:border-yellow-500/20'
+      : 'text-emerald-600 bg-emerald-50 dark:bg-emerald-500/10 border-emerald-200 dark:border-emerald-500/20'
   const dot = days > 30 ? '🔴' : days > 15 ? '🟡' : '🟢'
   return (
     <span className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-lg text-[10px] font-bold border ${style}`}>
@@ -83,21 +83,21 @@ export default function RequestTable({
   user, role, department, onStatsChange,
   filterMine = false, filterMyCases = false, showFilters = false,
 }) {
-  const [requests, setRequests]     = useState([])
-  const [loading, setLoading]       = useState(true)
-  const [updating, setUpdating]     = useState(null)
+  const [requests, setRequests] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [updating, setUpdating] = useState(null)
   const [expandedId, setExpandedId] = useState(null)
-  const [allTAs, setAllTAs]         = useState([])
+  const [allTAs, setAllTAs] = useState([])
   const [reassigningId, setReassigningId] = useState(null)
-  const [search, setSearch]         = useState('')
-  const [activeTab, setActiveTab]   = useState('ทั้งหมด')
+  const [search, setSearch] = useState('')
+  const [activeTab, setActiveTab] = useState('ทั้งหมด')
   const [filterDept, setFilterDept] = useState('')
   const [filterAssigned, setFilterAssigned] = useState('')
   const [filterDateFrom, setFilterDateFrom] = useState('')
-  const [filterDateTo, setFilterDateTo]     = useState('')
-  const [showFilterBar, setShowFilterBar]   = useState(false)
-  const [sortField, setSortField]   = useState('createdAt')
-  const [sortDir, setSortDir]       = useState('desc')
+  const [filterDateTo, setFilterDateTo] = useState('')
+  const [showFilterBar, setShowFilterBar] = useState(false)
+  const [sortField, setSortField] = useState('createdAt')
+  const [sortDir, setSortDir] = useState('desc')
   const [confirmState, setConfirmState] = useState({ isOpen: false, action: null, payload: null })
   // Onboarding modal: กรอกวันเริ่มงานก่อนเปลี่ยนสถานะ
   const [offeringModal, setOfferingModal] = useState({ isOpen: false, id: null })
@@ -109,7 +109,7 @@ export default function RequestTable({
   // ─── Realtime listener: ดึง hc_requests จาก Firestore แบบ realtime ───
   // คำนวณ stats (open/assigned/closed) และส่งกลับผ่าน onStatsChange callback
   useEffect(() => {
-    const q = query(collection(db, 'hc_requests'), orderBy('createdAt', 'desc'))
+    const q = query(collection(db, 'hc_requests'), orderBy('createdAt', 'desc'), limit(200))
     return onSnapshot(q, (snapshot) => {
       const data = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }))
       setRequests(data)
@@ -122,12 +122,12 @@ export default function RequestTable({
         : null
       onStatsChange?.(
         {
-          open:       active.filter((r) => r.status === 'Open').length,
-          assigned:   active.filter((r) => ['Recruiting', 'Interviewing'].includes(r.status)).length,
-          offering:   active.filter((r) => r.status === 'Offering').length,
+          open: active.filter((r) => r.status === 'Open').length,
+          assigned: active.filter((r) => ['Recruiting', 'Interviewing'].includes(r.status)).length,
+          offering: active.filter((r) => r.status === 'Offering').length,
           onboarding: active.filter((r) => r.status === 'Onboarding').length,
-          closed:     active.filter((r) => r.status === 'Closed').length,
-          total:      active.length,
+          closed: active.filter((r) => r.status === 'Closed').length,
+          total: active.length,
           avgDaysToFill,
         },
         data
@@ -184,7 +184,7 @@ export default function RequestTable({
 
     // บันทึก rejectedAt / closedAt เพื่อใช้คำนวณ SLA
     if (newStatus === 'Rejected') updateData.rejectedAt = serverTimestamp()
-    if (newStatus === 'Closed')   updateData.closedAt   = serverTimestamp()
+    if (newStatus === 'Closed') updateData.closedAt = serverTimestamp()
 
     await updateDoc(doc(db, 'hc_requests', id), updateData)
     const assignedAt = updateData.assignedAt ? new Date().toISOString() : req.assignedAt?.toDate?.().toISOString()
@@ -246,14 +246,14 @@ export default function RequestTable({
       assignedAt: serverTimestamp(),
     })
     sendStatusUpdate(id, req?.status, newTAName, now)
-    logAudit({ 
-      requestId: id, 
-      action: 'Assign', 
-      by: user.email, 
-      byName: user.displayName, 
-      fromStatus: req?.status, 
-      toStatus: req?.status, 
-      position: req?.position, 
+    logAudit({
+      requestId: id,
+      action: 'Assign',
+      by: user.email,
+      byName: user.displayName,
+      fromStatus: req?.status,
+      toStatus: req?.status,
+      position: req?.position,
       department: req?.department,
       note: `Reassigned from ${req.assignedToName} to ${newTAName}`
     })
@@ -265,7 +265,7 @@ export default function RequestTable({
     setUpdating(id)
     try {
       const req = requests.find((r) => r.id === id)
-      
+
       // 1. ลบไฟล์ JD ใน Supabase Storage (ถ้ามี)
       if (req?.jdFilePath) {
         await deleteJDFile(req.jdFilePath)
@@ -274,12 +274,12 @@ export default function RequestTable({
       // 2. ลบ Document ใน Firestore
       await deleteDoc(doc(db, 'hc_requests', id))
 
-      logAudit({ 
-        requestId: id, 
-        action: 'Delete', 
-        by: user.email, 
-        byName: user.displayName, 
-        position: req?.position, 
+      logAudit({
+        requestId: id,
+        action: 'Delete',
+        by: user.email,
+        byName: user.displayName,
+        position: req?.position,
         department: req?.department,
         note: 'Permanently deleted from database & storage by Admin'
       })
@@ -365,12 +365,12 @@ export default function RequestTable({
   }
 
   const departments = useMemo(() => [...new Set(requests.map((r) => r.department).filter(Boolean))].sort(), [requests])
-  const assignees   = useMemo(() => [...new Set(requests.map((r) => r.assignedToName).filter(Boolean))].sort(), [requests])
+  const assignees = useMemo(() => [...new Set(requests.map((r) => r.assignedToName).filter(Boolean))].sort(), [requests])
 
   // ─── คำนวณจำนวนรายการในแต่ละ Tab (นับตาม visibility rule เดียวกับ displayed) ───
   const tabCounts = useMemo(() => {
     let base = [...requests]
-    
+
     // Visibility logic
     if (role === 'manager') {
       // สำหรับ Manager: เห็นเฉพาะของตัวเอง + แผนกตัวเอง (หรือแผนกที่ override มาเทส)
@@ -412,10 +412,10 @@ export default function RequestTable({
         : list.filter((r) => r.assignedTo === user.email)
     }
     if (activeTab !== 'ทั้งหมด') list = list.filter((r) => r.status === activeTab)
-    if (filterDept)    list = list.filter((r) => r.department === filterDept)
+    if (filterDept) list = list.filter((r) => r.department === filterDept)
     if (filterAssigned) list = list.filter((r) => r.assignedToName === filterAssigned)
     if (filterDateFrom) list = list.filter((r) => r.createdAt?.toDate?.() >= new Date(filterDateFrom))
-    if (filterDateTo)  { const to = new Date(filterDateTo); to.setHours(23,59,59); list = list.filter((r) => r.createdAt?.toDate?.() <= to) }
+    if (filterDateTo) { const to = new Date(filterDateTo); to.setHours(23, 59, 59); list = list.filter((r) => r.createdAt?.toDate?.() <= to) }
     if (search) {
       const q = search.toLowerCase()
       list = list.filter((r) =>
@@ -470,11 +470,10 @@ export default function RequestTable({
         {showFilters && (
           <button
             onClick={() => setShowFilterBar(v => !v)}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm border transition-all font-medium ${
-              showFilterBar || hasAdvancedFilters
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm border transition-all font-medium ${showFilterBar || hasAdvancedFilters
                 ? 'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30'
                 : 'bg-white dark:bg-slate-900 text-gray-500 dark:text-slate-400 border-gray-200 dark:border-slate-800 hover:bg-gray-50 dark:hover:bg-slate-800'
-            }`}
+              }`}
           >
             <SlidersHorizontal size={13} />
             Filters
@@ -497,24 +496,22 @@ export default function RequestTable({
       <div className="flex items-center gap-1 border-b border-gray-100 dark:border-slate-800 overflow-x-auto pb-0">
         {STATUS_TABS.map((tab) => {
           const active = activeTab === tab
-          const count  = tabCounts[tab] ?? 0
+          const count = tabCounts[tab] ?? 0
           return (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
-              className={`flex items-center gap-1.5 px-3 py-2 text-sm font-semibold whitespace-nowrap transition-all border-b-2 -mb-px ${
-                active
+              className={`flex items-center gap-1.5 px-3 py-2 text-sm font-semibold whitespace-nowrap transition-all border-b-2 -mb-px ${active
                   ? 'border-[#008065] text-[#008065]'
                   : 'border-transparent text-gray-400 dark:text-slate-500 hover:text-gray-600 dark:hover:text-slate-300'
-              }`}
+                }`}
             >
               {tab}
               {count > 0 && (
-                <span className={`text-[10px] px-1.5 py-0.5 rounded-full leading-none transition-colors ${
-                  active
+                <span className={`text-[10px] px-1.5 py-0.5 rounded-full leading-none transition-colors ${active
                     ? 'bg-[#008065] text-white'
                     : 'bg-gray-100 dark:bg-slate-800 text-gray-500 dark:text-slate-400'
-                }`}>
+                  }`}>
                   {count}
                 </span>
               )}
@@ -578,32 +575,32 @@ export default function RequestTable({
                   { label: 'SLA', field: null },
                   { label: 'Actions', field: null },
                 ].map(({ label, field }) => (
-                    <th
-                      key={label}
-                      className={`px-4 py-3 text-left text-[10px] font-bold text-gray-400 dark:text-slate-500 uppercase tracking-widest ${field ? 'cursor-pointer select-none hover:text-[#008065] dark:hover:text-emerald-400' : ''} transition-colors`}
-                      onClick={field ? () => toggleSort(field) : undefined}
-                    >
-                      <span className="flex items-center gap-1.5">
-                        {label}
-                        {field && <SortIcon field={field} sortField={sortField} sortDir={sortDir} />}
-                      </span>
-                    </th>
+                  <th
+                    key={label}
+                    className={`px-4 py-3 text-left text-[10px] font-bold text-gray-400 dark:text-slate-500 uppercase tracking-widest ${field ? 'cursor-pointer select-none hover:text-[#008065] dark:hover:text-emerald-400' : ''} transition-colors`}
+                    onClick={field ? () => toggleSort(field) : undefined}
+                  >
+                    <span className="flex items-center gap-1.5">
+                      {label}
+                      {field && <SortIcon field={field} sortField={sortField} sortDir={sortDir} />}
+                    </span>
+                  </th>
                 ))}
-                </tr>
+              </tr>
             </thead>
             <tbody className="divide-y divide-gray-50 dark:divide-slate-800/50">
               {displayed.map((req) => {
                 // ─── Permission flags สำหรับแต่ละแถว ───
-                const isOwner  = req.requesterEmail === user.email
-                const isTA     = role === 'ta' || role === 'admin'
-                const isAdmin  = role === 'admin'
-                const isExpanded      = expandedId === req.id
-                const canViewFile     = req.jdFilePath && (isTA || isOwner)
-                const canCancel       = isAdmin || (isTA && req.status !== 'Closed' && req.status !== 'Cancelled') || (isOwner && req.status === 'Open')
-                const canClaim        = isTA && req.status === 'Open'
+                const isOwner = req.requesterEmail === user.email
+                const isTA = role === 'ta' || role === 'admin'
+                const isAdmin = role === 'admin'
+                const isExpanded = expandedId === req.id
+                const canViewFile = req.jdFilePath && (isTA || isOwner)
+                const canCancel = isAdmin || (isTA && req.status !== 'Closed' && req.status !== 'Cancelled') || (isOwner && req.status === 'Open')
+                const canClaim = isTA && req.status === 'Open'
                 const canUpdateStatus = filterMyCases && isTA && req.status !== 'Cancelled' && (req.status !== 'Closed' || isAdmin)
-                const canReassign     = isTA && (isAdmin || filterMyCases) && req.status !== 'Cancelled' && req.status !== 'Closed' && allTAs.length > 0
-                const isBusy          = updating === req.id
+                const canReassign = isTA && (isAdmin || filterMyCases) && req.status !== 'Cancelled' && req.status !== 'Closed' && allTAs.length > 0
+                const isBusy = updating === req.id
 
                 async function handleOpenFile(e) {
                   e.stopPropagation()
@@ -624,11 +621,10 @@ export default function RequestTable({
                         </div>
                       </td>
                       <td className="px-4 py-3">
-                        <span className={`inline-block px-2 py-0.5 rounded-lg text-[10px] font-black uppercase tracking-tight ${
-                          req.requestType === 'New HC'
+                        <span className={`inline-block px-2 py-0.5 rounded-lg text-[10px] font-black uppercase tracking-tight ${req.requestType === 'New HC'
                             ? 'bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-400'
                             : 'bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-400'
-                        }`}>
+                          }`}>
                           {req.requestType === 'New HC' ? 'New HC' : 'Replace'}
                         </span>
                       </td>
@@ -876,7 +872,7 @@ export default function RequestTable({
             <textarea
               value={rejectReason}
               onChange={(e) => setRejectReason(e.target.value)}
-              placeholder="เช่น ผู้สมัครขอถอนตัว, เงินเดือนไม่ตรง, ไม่ผ่านการทดสอบ..."
+              placeholder="เช่น ผู้สมัครขอถอนตัว,ป่วย,ไม่สะดวกมาเริ่มงานแล้ว (แอ๊บ) (ถ้าไม่ใส่จะขึ้นว่า No Reason)"
               rows={3}
               className="w-full px-4 py-2.5 border border-gray-200 dark:border-slate-700 rounded-xl bg-white dark:bg-slate-800 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-red-500/30 text-sm font-medium resize-none"
               autoFocus
