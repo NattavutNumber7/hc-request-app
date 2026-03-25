@@ -14,6 +14,16 @@ const STATUS_MAP = {
   'rejected': 'Recruiting',
 }
 
+// PIC name → Firestore email (เพิ่มได้เรื่อยๆ)
+const PIC_EMAIL_MAP = {
+  'jitlada (mo)':    'jitlada.m@freshket.co',
+  'jiratcha (belle)': 'jiratcha.a@freshket.co',
+}
+
+function picToEmail(name) {
+  return PIC_EMAIL_MAP[name.toLowerCase().trim()] || ''
+}
+
 const TYPE_MAP = {
   'replacement': 'Replacement',
   'replace': 'Replacement',
@@ -174,7 +184,7 @@ export default function ImportPage({ user, role, isDarkMode, toggleDarkMode }) {
           section: r.section,
           jg: r.jg,
           assignedToName: r.assignedToName,
-          assignedTo: '',
+          assignedTo: picToEmail(r.assignedToName),
           status: r.status,
           candidateName: r.candidateName,
           startDate: r.startDate,
