@@ -62,13 +62,21 @@ export default function ImportPage({ user, role, isDarkMode, toggleDarkMode }) {
 
     const mapped = filtered.map((r, i) => {
       const rawStatus = (r['Status'] || '').toString().toLowerCase().trim()
-      // "Job Type" = Replace/New HC, "Emp. Type" = Monthly/Contract (employment)
       const rawType = (r['Job Type'] || r['Emp. Type'] || '').toString().toLowerCase().trim()
-      const openDate = r['Open Jobs'] || r['Offering Date'] || r['Start Progress Date']
+
+      // วันเปิด request (column "Open Jobs") → createdAt
+      const openDate = r['Open Jobs'] || r['Start Progress Date'] || ''
+      // วันเริ่มงาน (column "Onboard Date") → startDate เท่านั้น ห้ามปน Offering Date
       const onboardDate = r['Onboard Date'] || r['Onboarded Date'] || ''
-      const createdAt = openDate instanceof Date
-        ? openDate
-        : (typeof openDate === 'string' && openDate ? new Date(openDate) : new Date('2026-01-01'))
+
+      function toDate(val) {
+        if (val instanceof Date) return val
+        if (typeof val === 'string' && val) return new Date(val)
+        return null
+      }
+
+      const createdAt = toDate(openDate) || new Date('2026-01-01')
+      const startDateObj = toDate(onboardDate)
 
       return {
         _rowNum: i + 1,
@@ -79,15 +87,11 @@ export default function ImportPage({ user, role, isDarkMode, toggleDarkMode }) {
         assignedToName: (r['PIC'] || '').toString().trim(),
         status: STATUS_MAP[rawStatus] || 'Closed',
         candidateName: (r['Offered Candidate'] || r['Candidate Name-Surname'] || '').toString().trim(),
-        startDate: onboardDate instanceof Date
-          ? onboardDate.toISOString().slice(0, 10)
-          : (typeof onboardDate === 'string' ? onboardDate.slice(0, 10) : ''),
+        startDate: startDateObj ? startDateObj.toISOString().slice(0, 10) : '',
         requestType: TYPE_MAP[rawType] || 'New HC',
         hcId: (r['HCID'] || r['HcID'] || '').toString().trim(),
         createdAt,
-        closedAt: rawStatus === 'onboard'
-          ? (onboardDate instanceof Date ? onboardDate : (onboardDate ? new Date(onboardDate) : createdAt))
-          : null,
+        closedAt: rawStatus === 'onboard' ? (startDateObj || createdAt) : null,
       }
     }).filter(r => r.position)
 
