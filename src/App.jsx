@@ -903,9 +903,13 @@ function AdminToolsPage({ user, role, isDarkMode, toggleDarkMode }) {
 
   async function bulkDeleteCollection(colName) {
     const snap = await getDocs(collection(db, colName))
-    const batch = writeBatch(db)
-    snap.docs.forEach(d => batch.delete(d.ref))
-    await batch.commit()
+    // Firestore batch max 500 — chunk ถ้ามีเยอะ
+    const CHUNK = 400
+    for (let i = 0; i < snap.docs.length; i += CHUNK) {
+      const batch = writeBatch(db)
+      snap.docs.slice(i, i + CHUNK).forEach(d => batch.delete(d.ref))
+      await batch.commit()
+    }
     return snap.size
   }
 
@@ -921,6 +925,8 @@ function AdminToolsPage({ user, role, isDarkMode, toggleDarkMode }) {
         const { data: files } = await listJDFiles()
         for (const f of files) await deleteJDFile(f.path)
         count = files.length
+      } else if (key === 'requests') {
+        count = await bulkDeleteCollection('hc_requests')
       }
       setStatus(s => ({ ...s, [key]: { state: 'done', count } }))
     } catch (err) {
@@ -957,6 +963,15 @@ function AdminToolsPage({ user, role, isDarkMode, toggleDarkMode }) {
       color: 'text-red-600 dark:text-red-400',
       bg: 'bg-red-50 dark:bg-red-900/20',
       border: 'border-red-200 dark:border-red-800',
+    },
+    {
+      key: 'requests',
+      icon: <Trash2 size={20} />,
+      label: 'HC Requests (ทั้งหมด)',
+      desc: 'ลบ request ทั้งหมดใน hc_requests — ระวัง ไม่สามารถย้อนกลับได้',
+      color: 'text-rose-700 dark:text-rose-400',
+      bg: 'bg-rose-50 dark:bg-rose-900/20',
+      border: 'border-rose-300 dark:border-rose-800',
     },
   ]
 
