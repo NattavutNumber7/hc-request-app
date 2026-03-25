@@ -1,5 +1,5 @@
-import { useEffect, useState, useMemo, Fragment } from 'react'
-import { collection, onSnapshot, orderBy, query, doc, updateDoc, getDocs, where, deleteDoc, serverTimestamp, arrayUnion, limit } from 'firebase/firestore'
+import { useEffect, useState, useMemo, useCallback, Fragment } from 'react'
+import { collection, onSnapshot, orderBy, query, doc, updateDoc, getDocs, where, deleteDoc, serverTimestamp, arrayUnion, limit, Timestamp } from 'firebase/firestore'
 import { db } from '../../services/firebase'
 import { sendStatusUpdate } from '../../services/webhook'
 import { logAudit } from '../../services/auditLog'
@@ -102,15 +102,21 @@ export default function RequestTable({
   // Onboarding modal: กรอกวันเริ่มงานก่อนเปลี่ยนสถานะ
   const [offeringModal, setOfferingModal] = useState({ isOpen: false, id: null })
   const [offeringStartDate, setOfferingStartDate] = useState('')
+  const [offeringCandidateName, setOfferingCandidateName] = useState('')
   // Reject modal: กรอกเหตุผลก่อน Reject
   const [rejectModal, setRejectModal] = useState({ isOpen: false, id: null })
   const [rejectReason, setRejectReason] = useState('')
+  // Admin: แก้ createdAt เพื่อทดสอบ SLA
+  const [slaTestModal, setSlaTestModal] = useState({ isOpen: false, id: null })
+  const [slaTestDate, setSlaTestDate] = useState('')
 
   // ─── Realtime listener: ดึง hc_requests จาก Firestore แบบ realtime ───
-  // คำนวณ stats (open/assigned/closed) และส่งกลับผ่าน onStatsChange callback
+  // ใช้ Page Visibility API → หยุด listener เมื่อ tab ไม่ active เพื่อลด Firestore reads
   useEffect(() => {
-    const q = query(collection(db, 'hc_requests'), orderBy('createdAt', 'desc'), limit(200))
-    return onSnapshot(q, (snapshot) => {
+    const q = query(collection(db, 'hc_requests'), orderBy('createdAt', 'desc'), limit(500))
+    let unsubscribe = null
+
+    const handleSnapshot = (snapshot) => {
       const data = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }))
       setRequests(data)
       setLoading(false)
@@ -132,7 +138,39 @@ export default function RequestTable({
         },
         data
       )
-    })
+    }
+
+    const subscribe = () => {
+      if (!unsubscribe) {
+        unsubscribe = onSnapshot(q, handleSnapshot)
+      }
+    }
+
+    const unsubscribeFn = () => {
+      if (unsubscribe) {
+        unsubscribe()
+        unsubscribe = null
+      }
+    }
+
+    // เริ่ม listener ทันที
+    subscribe()
+
+    // หยุด listener เมื่อ tab ซ่อนอยู่ → เปิดใหม่เมื่อกลับมา
+    const handleVisibility = () => {
+      if (document.hidden) {
+        unsubscribeFn()
+      } else {
+        subscribe()
+      }
+    }
+
+    document.addEventListener('visibilitychange', handleVisibility)
+
+    return () => {
+      unsubscribeFn()
+      document.removeEventListener('visibilitychange', handleVisibility)
+    }
   }, [onStatsChange])
 
   // ─── โหลดรายชื่อ TA/Admin สำหรับ dropdown reassign ───
@@ -149,116 +187,186 @@ export default function RequestTable({
   async function handleCancel(id) {
     setUpdating(id)
     const req = requests.find((r) => r.id === id)
-    await updateDoc(doc(db, 'hc_requests', id), { status: 'Cancelled', statusHistory: arrayUnion(buildHistoryEntry('Cancelled', user)) })
-    sendStatusUpdate(id, 'Cancelled')
-    logAudit({ requestId: id, action: 'Cancel', by: user.email, byName: user.displayName, fromStatus: req?.status, toStatus: 'Cancelled', position: req?.position, department: req?.department })
-    setUpdating(null)
+    try {
+      await updateDoc(doc(db, 'hc_requests', id), { status: 'Cancelled', statusHistory: arrayUnion(buildHistoryEntry('Cancelled', user)) })
+      sendStatusUpdate(id, 'Cancelled')
+      logAudit({ requestId: id, action: 'Cancel', by: user.email, byName: user.displayName, fromStatus: req?.status, toStatus: 'Cancelled', position: req?.position, department: req?.department })
+    } catch (err) {
+      console.error('[handleCancel]', err)
+    } finally {
+      setUpdating(null)
+    }
   }
 
   async function handleClaim(id) {
     setUpdating(id)
     const req = requests.find((r) => r.id === id)
-    await updateDoc(doc(db, 'hc_requests', id), { status: 'Recruiting', assignedTo: user.email, assignedToName: user.displayName, assignedAt: serverTimestamp(), statusHistory: arrayUnion(buildHistoryEntry('Recruiting', user)) })
-    sendStatusUpdate(id, 'Recruiting', user.displayName, new Date().toISOString())
-    logAudit({ requestId: id, action: 'Assign', by: user.email, byName: user.displayName, fromStatus: req?.status, toStatus: 'Recruiting', position: req?.position, department: req?.department })
-    setUpdating(null)
+    try {
+      await updateDoc(doc(db, 'hc_requests', id), { status: 'Recruiting', assignedTo: user.email, assignedToName: user.displayName, assignedAt: serverTimestamp(), statusHistory: arrayUnion(buildHistoryEntry('Recruiting', user)) })
+      sendStatusUpdate(id, 'Recruiting', user.displayName, new Date().toISOString())
+      logAudit({ requestId: id, action: 'Assign', by: user.email, byName: user.displayName, fromStatus: req?.status, toStatus: 'Recruiting', position: req?.position, department: req?.department })
+    } catch (err) {
+      console.error('[handleClaim]', err)
+    } finally {
+      setUpdating(null)
+    }
   }
 
   // Auto-assign TA ถ้ายังไม่มีคนรับเคสและเปลี่ยนจาก Open → working status
-  // extraData: ข้อมูลเพิ่มเติม เช่น { startDate } ตอนเปลี่ยนเป็น Offering
+  // extraData: ข้อมูลเพิ่มเติม เช่น { startDate, candidateName } ตอนเปลี่ยนเป็น Onboarding
   async function handleStatusChange(id, newStatus, extraData = {}) {
     const req = requests.find((r) => r.id === id)
+    try {
+      const updateData = {
+        status: newStatus,
+        ...extraData,
+        statusHistory: arrayUnion(buildHistoryEntry(newStatus, user)),
+      }
 
-    const updateData = {
-      status: newStatus,
-      ...extraData,
-      statusHistory: arrayUnion(buildHistoryEntry(newStatus, user)),
+      if (req.status === 'Open' && ['Recruiting', 'Interviewing', 'Offering', 'Closed'].includes(newStatus) && !req.assignedTo) {
+        updateData.assignedTo = user.email
+        updateData.assignedToName = user.displayName
+        updateData.assignedAt = serverTimestamp()
+      }
+
+      if (newStatus === 'Rejected') updateData.rejectedAt = serverTimestamp()
+      if (newStatus === 'Closed') updateData.closedAt = serverTimestamp()
+      if (newStatus === 'Onboarding') { updateData.rejectReason = ''; updateData.rejectedAt = null }
+
+      await updateDoc(doc(db, 'hc_requests', id), updateData)
+      const assignedAt = updateData.assignedAt ? new Date().toISOString() : req.assignedAt?.toDate?.().toISOString()
+      sendStatusUpdate(id, newStatus, updateData.assignedToName || req.assignedToName, assignedAt, extraData.startDate || null, extraData.candidateName || null)
+      logAudit({
+        requestId: id,
+        action: newStatus === 'Rejected' ? 'Rejected' : 'StatusChange',
+        by: user.email,
+        byName: user.displayName,
+        fromStatus: req?.status,
+        toStatus: newStatus,
+        position: req?.position,
+        department: req?.department,
+        note: [
+          extraData.startDate ? `วันเริ่มงาน: ${extraData.startDate}` : null,
+          extraData.candidateName ? `Candidate: ${extraData.candidateName}` : null,
+        ].filter(Boolean).join(', ') || undefined,
+      })
+    } catch (err) {
+      console.error('[handleStatusChange]', err)
     }
-
-    // Auto-assign if changing from Open to a working status and not already assigned
-    if (req.status === 'Open' && ['Recruiting', 'Interviewing', 'Offering', 'Closed'].includes(newStatus) && !req.assignedTo) {
-      updateData.assignedTo = user.email
-      updateData.assignedToName = user.displayName
-      updateData.assignedAt = serverTimestamp()
-    }
-
-    // บันทึก rejectedAt / closedAt เพื่อใช้คำนวณ SLA
-    if (newStatus === 'Rejected') updateData.rejectedAt = serverTimestamp()
-    if (newStatus === 'Closed') updateData.closedAt = serverTimestamp()
-
-    await updateDoc(doc(db, 'hc_requests', id), updateData)
-    const assignedAt = updateData.assignedAt ? new Date().toISOString() : req.assignedAt?.toDate?.().toISOString()
-    sendStatusUpdate(id, newStatus, updateData.assignedToName || req.assignedToName, assignedAt, extraData.startDate || null)
-    logAudit({
-      requestId: id,
-      action: newStatus === 'Rejected' ? 'Rejected' : 'StatusChange',
-      by: user.email,
-      byName: user.displayName,
-      fromStatus: req?.status,
-      toStatus: newStatus,
-      position: req?.position,
-      department: req?.department,
-      note: extraData.startDate ? `วันเริ่มงาน: ${extraData.startDate}` : undefined,
-    })
   }
 
-  // Onboarding confirm: บันทึกวันเริ่มงาน + เปลี่ยนสถานะ
+  // Onboarding confirm: บันทึกวันเริ่มงาน + ชื่อ candidate + เปลี่ยนสถานะ
   async function handleOfferingConfirm() {
     if (!offeringStartDate || !offeringModal.id) return
-    await handleStatusChange(offeringModal.id, 'Onboarding', { startDate: offeringStartDate })
+    await handleStatusChange(offeringModal.id, 'Onboarding', {
+      startDate: offeringStartDate,
+      candidateName: offeringCandidateName.trim(),
+    })
     setOfferingModal({ isOpen: false, id: null })
     setOfferingStartDate('')
+    setOfferingCandidateName('')
   }
 
-  // Reject confirm: บันทึกเหตุผล + เปลี่ยนสถานะเป็น Rejected
+  // Reject confirm: บันทึก Rejected → ย้ายไป Recruiting อัตโนมัติ (TA คนเดิม)
   async function handleRejectConfirm() {
     if (!rejectModal.id) return
-    await handleStatusChange(rejectModal.id, 'Rejected', { rejectReason: rejectReason.trim() || 'ไม่ระบุเหตุผล' })
+    const req = requests.find((r) => r.id === rejectModal.id)
+    try {
+      // Step 1: บันทึก Rejected พร้อมเหตุผล
+      await updateDoc(doc(db, 'hc_requests', rejectModal.id), {
+        status: 'Rejected',
+        rejectReason: rejectReason.trim() || 'ไม่ระบุเหตุผล',
+        rejectedAt: serverTimestamp(),
+        statusHistory: arrayUnion(buildHistoryEntry('Rejected', user)),
+      })
+      // Step 2: ย้ายไป Recruiting ทันที (TA คนเดิม ไม่ reset assignedTo)
+      await updateDoc(doc(db, 'hc_requests', rejectModal.id), {
+        status: 'Recruiting',
+        startDate: '',
+        statusHistory: arrayUnion(buildHistoryEntry('Recruiting', user)),
+      })
+      sendStatusUpdate(rejectModal.id, 'Recruiting', req?.assignedToName)
+      logAudit({
+        requestId: rejectModal.id,
+        action: 'Rejected',
+        by: user.email,
+        byName: user.displayName,
+        fromStatus: req?.status,
+        toStatus: 'Recruiting',
+        position: req?.position,
+        department: req?.department,
+        note: `Rejected → Recruiting (${rejectReason.trim() || 'ไม่ระบุเหตุผล'})`,
+      })
+    } catch (err) {
+      console.error('[handleRejectConfirm]', err)
+    }
     setRejectModal({ isOpen: false, id: null })
     setRejectReason('')
+  }
+
+  // Admin: เปลี่ยน createdAt เพื่อทดสอบ SLA
+  async function handleSlaTestSave() {
+    if (!slaTestModal.id || !slaTestDate) return
+    try {
+      const ts = Timestamp.fromDate(new Date(slaTestDate))
+      await updateDoc(doc(db, 'hc_requests', slaTestModal.id), { createdAt: ts })
+      setSlaTestModal({ isOpen: false, id: null })
+      setSlaTestDate('')
+    } catch (err) {
+      console.error('[handleSlaTestSave]', err)
+    }
   }
 
   // Rejected → เปิด recruit ใหม่ (ย้อนกลับเป็น Open)
   async function handleReopen(id) {
     const req = requests.find((r) => r.id === id)
-    await updateDoc(doc(db, 'hc_requests', id), { status: 'Open', startDate: '', rejectedAt: null, statusHistory: arrayUnion(buildHistoryEntry('Open', user)) })
-    sendStatusUpdate(id, 'Open', req.assignedToName)
-    logAudit({
-      requestId: id,
-      action: 'Reopen',
-      by: user.email,
-      byName: user.displayName,
-      fromStatus: 'Rejected',
-      toStatus: 'Open',
-      position: req?.position,
-      department: req?.department,
-      note: 'ผู้สมัครไม่มารายงานตัว — เปิด recruit ใหม่',
-    })
+    try {
+      await updateDoc(doc(db, 'hc_requests', id), { status: 'Open', startDate: '', rejectedAt: null, statusHistory: arrayUnion(buildHistoryEntry('Open', user)) })
+      sendStatusUpdate(id, 'Open', req.assignedToName)
+      logAudit({
+        requestId: id,
+        action: 'Reopen',
+        by: user.email,
+        byName: user.displayName,
+        fromStatus: 'Rejected',
+        toStatus: 'Open',
+        position: req?.position,
+        department: req?.department,
+        note: 'ผู้สมัครไม่มารายงานตัว — เปิด recruit ใหม่',
+      })
+    } catch (err) {
+      console.error('[handleReopen]', err)
+    }
   }
 
   async function handleReassign(id, newTAEmail, newTAName) {
     setUpdating(id)
     const req = requests.find((r) => r.id === id)
     const now = new Date().toISOString()
-    await updateDoc(doc(db, 'hc_requests', id), {
-      assignedTo: newTAEmail,
-      assignedToName: newTAName,
-      assignedAt: serverTimestamp(),
-    })
-    sendStatusUpdate(id, req?.status, newTAName, now)
-    logAudit({
-      requestId: id,
-      action: 'Assign',
-      by: user.email,
-      byName: user.displayName,
-      fromStatus: req?.status,
-      toStatus: req?.status,
-      position: req?.position,
-      department: req?.department,
-      note: `Reassigned from ${req.assignedToName} to ${newTAName}`
-    })
-    setReassigningId(null)
-    setUpdating(null)
+    try {
+      await updateDoc(doc(db, 'hc_requests', id), {
+        assignedTo: newTAEmail,
+        assignedToName: newTAName,
+        assignedAt: serverTimestamp(),
+      })
+      sendStatusUpdate(id, req?.status, newTAName, now)
+      logAudit({
+        requestId: id,
+        action: 'Assign',
+        by: user.email,
+        byName: user.displayName,
+        fromStatus: req?.status,
+        toStatus: req?.status,
+        position: req?.position,
+        department: req?.department,
+        note: `Reassigned from ${req.assignedToName} to ${newTAName}`
+      })
+    } catch (err) {
+      console.error('[handleReassign]', err)
+    } finally {
+      setReassigningId(null)
+      setUpdating(null)
+    }
   }
 
   async function handleDelete(id) {
@@ -359,10 +467,10 @@ export default function RequestTable({
     }
   }
 
-  function toggleSort(field) {
+  const toggleSort = useCallback((field) => {
     if (sortField === field) setSortDir((d) => d === 'asc' ? 'desc' : 'asc')
     else { setSortField(field); setSortDir('desc') }
-  }
+  }, [sortField])
 
   const departments = useMemo(() => [...new Set(requests.map((r) => r.department).filter(Boolean))].sort(), [requests])
   const assignees = useMemo(() => [...new Set(requests.map((r) => r.assignedToName).filter(Boolean))].sort(), [requests])
@@ -738,6 +846,13 @@ export default function RequestTable({
                             </button>
                           )}
                           {isAdmin && (
+                            <button onClick={(e) => { e.stopPropagation(); setSlaTestDate(req.createdAt?.toDate?.().toISOString().slice(0,10) ?? ''); setSlaTestModal({ isOpen: true, id: req.id }) }} disabled={isBusy}
+                              className="flex items-center gap-1.5 px-2.5 py-1 text-purple-700 bg-purple-100 dark:bg-purple-900/40 dark:text-purple-300 text-[10px] font-bold rounded-lg hover:bg-purple-200 dark:hover:bg-purple-800/50 disabled:opacity-50 transition-all uppercase tracking-tight shadow-sm"
+                            >
+                              🧪 SLA
+                            </button>
+                          )}
+                          {isAdmin && (
                             <button onClick={(e) => { e.stopPropagation(); openConfirm('delete', { id: req.id }) }} disabled={isBusy}
                               className="flex items-center gap-1.5 px-2.5 py-1 text-white bg-red-600 dark:bg-red-700 text-[10px] font-bold rounded-lg hover:bg-red-700 dark:hover:bg-red-800 disabled:opacity-50 transition-all uppercase tracking-tight shadow-sm"
                             >
@@ -764,6 +879,14 @@ export default function RequestTable({
                                 </p>
                                 <p className="text-xl font-black text-[#008065] dark:text-emerald-500 tabular-nums">{req.headcount ?? 1} <span className="text-sm font-bold text-gray-400">คน</span></p>
                               </div>
+                              {req.candidateName && (
+                                <div>
+                                  <p className="text-[10px] font-black text-gray-400 dark:text-slate-600 uppercase tracking-widest flex items-center gap-1.5 mb-2">
+                                    <UserCheck size={12} strokeWidth={3} /> Candidate
+                                  </p>
+                                  <p className="text-sm font-extrabold text-indigo-600 dark:text-indigo-400">{req.candidateName}</p>
+                                </div>
+                              )}
                               {req.startDate && (
                                 <div>
                                   <p className="text-[10px] font-black text-gray-400 dark:text-slate-600 uppercase tracking-widest flex items-center gap-1.5 mb-2">
@@ -844,6 +967,87 @@ export default function RequestTable({
                               )}
                             </div>
                           </div>
+
+                          {/* ── Stage Duration (simplified: Open → Offering → Close/Reject) ── */}
+                          {req.statusHistory?.length > 0 && (() => {
+                            const KEY_STAGES = ['Open', 'Offering', 'Onboarding', 'Rejected', 'Closed', 'Cancelled']
+                            const STAGE_CFG = {
+                              Open:       { label: 'Open',       dot: 'bg-gray-400',    badge: 'bg-gray-100 dark:bg-slate-800 text-gray-600 dark:text-slate-400',             text: 'text-gray-500 dark:text-slate-400' },
+                              Offering:   { label: 'Offering',   dot: 'bg-indigo-500',  badge: 'bg-indigo-50 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-400',     text: 'text-indigo-600 dark:text-indigo-400' },
+                              Onboarding: { label: 'W.Onboarding', dot: 'bg-teal-500', badge: 'bg-teal-50 dark:bg-teal-900/30 text-teal-700 dark:text-teal-400',             text: 'text-teal-600 dark:text-teal-400' },
+                              Rejected:   { label: 'Rejected',   dot: 'bg-red-500',     badge: 'bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-400',                 text: 'text-red-500 dark:text-red-400' },
+                              Closed:     { label: 'Closed',     dot: 'bg-emerald-500', badge: 'bg-emerald-50 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400', text: 'text-emerald-600 dark:text-emerald-400' },
+                              Cancelled:  { label: 'Cancelled',  dot: 'bg-slate-400',   badge: 'bg-slate-100 dark:bg-slate-800 text-slate-500',                               text: 'text-slate-400' },
+                            }
+
+                            // เรียง history ตามเวลา
+                            const sorted = [...req.statusHistory].sort((a, b) => new Date(a.changedAt) - new Date(b.changedAt))
+
+                            // สร้าง full timeline เริ่มจาก Open (createdAt)
+                            const hasOpen = sorted[0]?.status === 'Open'
+                            const full = hasOpen ? sorted : [
+                              { status: 'Open', changedAt: req.createdAt?.toDate?.().toISOString() },
+                              ...sorted,
+                            ]
+
+                            // กรองเฉพาะ key stages (ตัด Recruiting/Interviewing ออก)
+                            // เก็บไว้ทุก Rejected เพื่อแสดงประวัติ reject ซ้ำ
+                            const keyEntries = full.filter(e => KEY_STAGES.includes(e.status))
+
+                            // คำนวณ days ระหว่าง key stages
+                            // ช่วง Open → Offering = นับวันรวมตั้งแต่ open (ผ่าน Recruiting/Interview ด้วย)
+                            const segments = keyEntries.map((entry, i) => {
+                              const start = new Date(entry.changedAt)
+                              const nextKey = keyEntries[i + 1]
+                              const end = nextKey ? new Date(nextKey.changedAt) : new Date()
+                              const days = Math.max(0, Math.round((end - start) / (1000 * 60 * 60 * 24)))
+                              const dateStr = start.toLocaleDateString('th-TH', { day: 'numeric', month: 'short' })
+                              return { ...entry, days, isCurrent: !nextKey, dateStr }
+                            })
+
+                            const totalDays = getDaysOpen(req)
+                            const isDone = ['Closed', 'Cancelled'].includes(req.status)
+
+                            return (
+                              <div className="mt-4 rounded-2xl border border-gray-100 dark:border-slate-800 bg-gray-50/50 dark:bg-slate-900/50 p-4">
+                                <div className="flex items-center justify-between mb-3">
+                                  <p className="text-[10px] font-black text-gray-400 dark:text-slate-600 uppercase tracking-widest">⏱ Stage Duration</p>
+                                  <div className="flex items-center gap-1">
+                                    <span className="text-[10px] text-gray-400 dark:text-slate-600">รวม</span>
+                                    <span className="text-sm font-black text-gray-700 dark:text-gray-200 tabular-nums">{totalDays}</span>
+                                    <span className="text-[10px] text-gray-400 dark:text-slate-500">วัน</span>
+                                  </div>
+                                </div>
+                                <div className="flex flex-col">
+                                  {segments.map((seg, i) => {
+                                    const c = STAGE_CFG[seg.status] || STAGE_CFG.Open
+                                    const isLast = i === segments.length - 1
+                                    return (
+                                      <div key={i} className="flex items-stretch gap-3">
+                                        <div className="flex flex-col items-center w-4 flex-shrink-0 pt-1.5">
+                                          <span className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${c.dot} ${seg.isCurrent && !isDone ? 'animate-pulse' : ''}`}/>
+                                          {!isLast && <span className="flex-1 w-px bg-gray-200 dark:bg-slate-700 my-1"/>}
+                                        </div>
+                                        <div className={`flex items-center justify-between flex-1 ${isLast ? 'pb-0' : 'pb-3'}`}>
+                                          <div className="flex items-center gap-2">
+                                            <span className={`text-[11px] font-black uppercase tracking-wide ${c.text}`}>{c.label}</span>
+                                            <span className="text-[10px] text-gray-400 dark:text-slate-600">{seg.dateStr}</span>
+                                            {seg.isCurrent && !isDone && (
+                                              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400">กำลังดำเนินการ</span>
+                                            )}
+                                          </div>
+                                          <span className={`text-[11px] font-black tabular-nums px-2 py-0.5 rounded-lg ${c.badge}`}>
+                                            {seg.isCurrent && !isDone ? `${seg.days}+ วัน` : `${seg.days} วัน`}
+                                          </span>
+                                        </div>
+                                      </div>
+                                    )
+                                  })}
+                                </div>
+                              </div>
+                            )
+                          })()}
+
                         </td>
                       </tr>
                     )}
@@ -895,29 +1099,72 @@ export default function RequestTable({
         </div>
       )}
 
+      {/* ── Admin SLA Test Modal ── */}
+      {slaTestModal.isOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+          <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-gray-200 dark:border-slate-700 w-full max-w-sm mx-4 p-6">
+            <h3 className="text-lg font-black text-gray-800 dark:text-gray-100 mb-1">🧪 ทดสอบ SLA</h3>
+            <p className="text-sm text-gray-500 dark:text-slate-400 mb-5">เปลี่ยนวันที่ยื่นคำขอเพื่อทดสอบ SLA Badge (Admin only)</p>
+            <label className="block text-[10px] font-black text-gray-500 dark:text-slate-500 uppercase tracking-widest mb-2">วันที่ยื่น (createdAt)</label>
+            <input
+              type="date"
+              value={slaTestDate}
+              onChange={(e) => setSlaTestDate(e.target.value)}
+              className="w-full px-4 py-2.5 border border-gray-200 dark:border-slate-700 rounded-xl bg-white dark:bg-slate-800 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-purple-500/30 text-sm font-medium"
+              autoFocus
+            />
+            <div className="flex gap-2 mt-3 text-[11px] text-gray-400">
+              <button onClick={() => setSlaTestDate(new Date(Date.now() - 5*24*60*60*1000).toISOString().slice(0,10))} className="px-2 py-1 bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-400 rounded-lg font-bold">🟢 5 วัน</button>
+              <button onClick={() => setSlaTestDate(new Date(Date.now() - 20*24*60*60*1000).toISOString().slice(0,10))} className="px-2 py-1 bg-yellow-50 dark:bg-yellow-900/20 text-yellow-700 dark:text-yellow-400 rounded-lg font-bold">🟡 20 วัน</button>
+              <button onClick={() => setSlaTestDate(new Date(Date.now() - 35*24*60*60*1000).toISOString().slice(0,10))} className="px-2 py-1 bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-400 rounded-lg font-bold">🔴 35 วัน</button>
+            </div>
+            <div className="flex gap-3 mt-5">
+              <button onClick={() => { setSlaTestModal({ isOpen: false, id: null }); setSlaTestDate('') }}
+                className="flex-1 px-4 py-2.5 text-sm font-bold rounded-xl border border-gray-200 dark:border-slate-700 text-gray-600 dark:text-slate-400 hover:bg-gray-50 dark:hover:bg-slate-800 transition-colors">
+                ยกเลิก
+              </button>
+              <button onClick={handleSlaTestSave} disabled={!slaTestDate}
+                className="flex-1 px-4 py-2.5 text-sm font-bold rounded-xl bg-purple-600 text-white hover:bg-purple-700 transition-colors shadow-md shadow-purple-500/20 disabled:opacity-50">
+                บันทึก
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {offeringModal.isOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
           <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-gray-200 dark:border-slate-700 w-full max-w-sm mx-4 p-6">
             <h3 className="text-lg font-black text-gray-800 dark:text-gray-100 mb-1">Waiting Onboarding</h3>
-            <p className="text-sm text-gray-500 dark:text-slate-400 mb-5">กรุณากรอกวันเริ่มงานของผู้สมัคร</p>
-            <label className="block text-[10px] font-black text-gray-500 dark:text-slate-500 uppercase tracking-widest mb-2">วันเริ่มงาน</label>
+            <p className="text-sm text-gray-500 dark:text-slate-400 mb-5">กรุณากรอกข้อมูลผู้สมัครที่รับ offer</p>
+
+            <label className="block text-[10px] font-black text-gray-500 dark:text-slate-500 uppercase tracking-widest mb-2">ชื่อ Candidate *</label>
+            <input
+              type="text"
+              value={offeringCandidateName}
+              onChange={(e) => setOfferingCandidateName(e.target.value)}
+              placeholder="ชื่อ-นามสกุล ผู้สมัคร"
+              className="w-full px-4 py-2.5 border border-gray-200 dark:border-slate-700 rounded-xl bg-white dark:bg-slate-800 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 text-sm font-medium mb-4"
+              autoFocus
+            />
+
+            <label className="block text-[10px] font-black text-gray-500 dark:text-slate-500 uppercase tracking-widest mb-2">วันเริ่มงาน *</label>
             <input
               type="date"
               value={offeringStartDate}
               onChange={(e) => setOfferingStartDate(e.target.value)}
               className="w-full px-4 py-2.5 border border-gray-200 dark:border-slate-700 rounded-xl bg-white dark:bg-slate-800 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 text-sm font-medium"
-              autoFocus
             />
             <div className="flex gap-3 mt-6">
               <button
-                onClick={() => { setOfferingModal({ isOpen: false, id: null }); setOfferingStartDate('') }}
+                onClick={() => { setOfferingModal({ isOpen: false, id: null }); setOfferingStartDate(''); setOfferingCandidateName('') }}
                 className="flex-1 px-4 py-2.5 text-sm font-bold rounded-xl border border-gray-200 dark:border-slate-700 text-gray-600 dark:text-slate-400 hover:bg-gray-50 dark:hover:bg-slate-800 transition-colors"
               >
                 ยกเลิก
               </button>
               <button
                 onClick={handleOfferingConfirm}
-                disabled={!offeringStartDate}
+                disabled={!offeringStartDate || !offeringCandidateName.trim()}
                 className="flex-1 px-4 py-2.5 text-sm font-bold rounded-xl bg-teal-600 text-white hover:bg-teal-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shadow-md shadow-teal-500/20"
               >
                 ยืนยัน Onboarding

@@ -16,17 +16,26 @@ const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY
 
 export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
 
+const MAX_FILE_SIZE_MB = 10
+const ALLOWED_TYPES = ['application/pdf']
+
 /**
  * อัพโหลดไฟล์ JD ไปยัง Supabase Storage
- * @param {File} file - ไฟล์ที่จะอัพโหลด
+ * @param {File} file - ไฟล์ที่จะอัพโหลด (PDF เท่านั้น, ไม่เกิน 10MB)
  * @param {string} requestId - Firebase doc ID ใช้เป็น folder
- * @param {string} accessToken - reserved for future authenticated upload flow
- * @returns {Promise<{url: string|null, error: string|null}>}
+ * @returns {Promise<{url: string|null, path: string|null, error: string|null}>}
  */
-export async function uploadJDFile(file, requestId, accessToken) {
-  void accessToken
+export async function uploadJDFile(file, requestId) {
+  if (!ALLOWED_TYPES.includes(file.type)) {
+    return { url: null, path: null, error: 'อัพโหลดได้เฉพาะไฟล์ PDF เท่านั้น' }
+  }
+  if (file.size > MAX_FILE_SIZE_MB * 1024 * 1024) {
+    return { url: null, path: null, error: `ไฟล์ต้องไม่เกิน ${MAX_FILE_SIZE_MB}MB` }
+  }
+
   try {
-    const fileName = file.name.replace(/\s+/g, '_') // แทนที่ช่องว่างด้วย underscore
+    const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_')
+    const fileName = safeName
     const filePath = `${requestId}/${Date.now()}_${fileName}`
 
     const { error: uploadError } = await supabase.storage

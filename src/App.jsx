@@ -3,15 +3,15 @@ import { Routes, Route, Navigate } from 'react-router-dom'
 import { onAuthStateChanged } from 'firebase/auth'
 import { auth } from './services/firebase'
 import { fetchSheetsData, getDepartmentByEmail } from './services/sheetsData'
-import { doc, getDoc, getDocs, addDoc, collection, onSnapshot, orderBy, query, setDoc, deleteDoc, updateDoc, deleteField, serverTimestamp, where, limit } from 'firebase/firestore'
+import { doc, getDoc, getDocs, addDoc, collection, onSnapshot, orderBy, query, setDoc, deleteDoc, updateDoc, deleteField, serverTimestamp, where, limit, writeBatch } from 'firebase/firestore'
 import { db } from './services/firebase'
-import { FolderOpen, FileText, ExternalLink, Clock, Settings2, UserPlus, Trash2, Tag, Search, Plus, PowerOff, Power } from 'lucide-react'
+import { FolderOpen, FileText, ExternalLink, Clock, Settings2, UserPlus, Trash2, Tag, Search, Plus, PowerOff, Power, DatabaseZap, AlertTriangle } from 'lucide-react'
 import { listJDFiles, getJDSignedUrl, deleteJDFile } from './services/supabase'
 import { sendMaintenanceAlert } from './services/webhook'
 
 // โหลดทันที — ใช้ทุกหน้า
 import Login from './components/Auth/Login'
-import NavBar from './components/Shared/NavBar'
+import Layout from './components/Shared/Layout'
 import ConfirmModal from './components/Shared/ConfirmModal'
 import StatCards from './components/Dashboard/StatCards'
 import RequestTable from './components/Dashboard/RequestTable'
@@ -19,6 +19,7 @@ import MonthlyPipeline from './components/Dashboard/MonthlyPipeline'
 
 // Lazy load — โหลดเฉพาะตอนเปิดหน้านั้น
 const HCRequestForm = lazy(() => import('./components/Forms/HCRequestForm'))
+const ImportPage    = lazy(() => import('./components/Admin/ImportPage'))
 
 const DEV_EMAIL = import.meta.env.VITE_DEV_EMAIL
 
@@ -65,18 +66,6 @@ function RoleSwitcher({ currentRole, onSwitch, currentDept, onDeptSwitch }) {
           />
         </div>
       </div>
-    </div>
-  )
-}
-
-// ─── Layout หลักที่ครอบทุกหน้า (NavBar + main content) ───
-function Layout({ user, role, isDarkMode, toggleDarkMode, children }) {
-  return (
-    <div className="min-h-screen flex flex-col transition-colors duration-300 bg-[#f5f7f6] dark:bg-slate-950">
-      <NavBar user={user} role={role} isDarkMode={isDarkMode} toggleDarkMode={toggleDarkMode} />
-      <main className="flex-1 px-6 py-7 max-w-7xl mx-auto w-full">
-        {children}
-      </main>
     </div>
   )
 }
@@ -212,12 +201,25 @@ function UserManagementPage({ user, role, isDarkMode, toggleDarkMode }) {
     })
   }, [])
 
+  const VALID_ROLES = ['manager', 'ta', 'admin']
+
   async function handleAdd(e) {
     if (e) e.preventDefault()
-    if (!emailInput) return
+    const email = emailInput.trim().toLowerCase()
+    if (!email) return
+    if (!email.endsWith('@freshket.co')) {
+      setPageError('อนุญาตเฉพาะ email @freshket.co เท่านั้น')
+      setTimeout(() => setPageError(''), 4000)
+      return
+    }
+    if (!VALID_ROLES.includes(roleSelect)) {
+      setPageError('Role ไม่ถูกต้อง')
+      setTimeout(() => setPageError(''), 4000)
+      return
+    }
     setIsBusy(true)
     try {
-      await setDoc(doc(db, 'users', emailInput.trim().toLowerCase()), {
+      await setDoc(doc(db, 'users', email), {
         name: nameInput,
         role: roleSelect,
         updatedAt: new Date()
@@ -240,6 +242,7 @@ function UserManagementPage({ user, role, isDarkMode, toggleDarkMode }) {
   }
 
   async function handleUpdateRole(email, newRole) {
+    if (!VALID_ROLES.includes(newRole)) return
     try {
       await setDoc(doc(db, 'users', email), { role: newRole }, { merge: true })
     } catch (e) {
@@ -267,12 +270,14 @@ function UserManagementPage({ user, role, isDarkMode, toggleDarkMode }) {
             <UserPlus size={16} /> กำหนด Role ใหม่
           </h2>
           <form onSubmit={handleAdd} className="grid grid-cols-1 md:grid-cols-4 gap-4">
-            <input 
+            <input
+              id="user-email" name="user-email"
               type="email" required placeholder="User Email (freshket.co)"
               value={emailInput} onChange={e => setEmailInput(e.target.value)}
               className="px-4 py-2 rounded-xl border border-gray-200 dark:border-slate-800 bg-gray-50 dark:bg-slate-950 dark:text-gray-100 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
             />
-            <input 
+            <input
+              id="user-name" name="user-name"
               type="text" placeholder="Full Name"
               value={nameInput} onChange={e => setNameInput(e.target.value)}
               className="px-4 py-2 rounded-xl border border-gray-200 dark:border-slate-800 bg-gray-50 dark:bg-slate-950 dark:text-gray-100 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
@@ -569,10 +574,15 @@ function AuditLogPage({ user, role, isDarkMode, toggleDarkMode }) {
 
   useEffect(() => {
     const q = query(collection(db, 'hc_logs'), orderBy('timestamp', 'desc'), limit(500))
-    getDocs(q).then((snap) => {
-      setLogs(snap.docs.map((d) => ({ id: d.id, ...d.data() })))
-      setLoading(false)
-    })
+    getDocs(q)
+      .then((snap) => {
+        setLogs(snap.docs.map((d) => ({ id: d.id, ...d.data() })))
+        setLoading(false)
+      })
+      .catch((err) => {
+        console.error('[AuditLog] fetch error:', err)
+        setLoading(false)
+      })
   }, [])
 
   async function handleDeleteLog(logId) {
@@ -770,6 +780,7 @@ function CustomPositionsPage({ user, role, isDarkMode, toggleDarkMode }) {
           </h2>
           <form onSubmit={handleAdd} className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <input
+              id="pos-department" name="pos-department"
               type="text" placeholder="ชื่อแผนก"
               value={addForm.department} onChange={e => setAddForm(f => ({ ...f, department: e.target.value }))}
               className="px-4 py-2 rounded-xl border border-gray-200 dark:border-slate-800 bg-gray-50 dark:bg-slate-950 dark:text-gray-100 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
@@ -782,6 +793,7 @@ function CustomPositionsPage({ user, role, isDarkMode, toggleDarkMode }) {
               <option value="OPERATION">OPERATION</option>
             </select>
             <input
+              id="pos-position" name="pos-position"
               type="text" placeholder="ชื่อตำแหน่ง" required
               value={addForm.position} onChange={e => setAddForm(f => ({ ...f, position: e.target.value }))}
               className="px-4 py-2 rounded-xl border border-gray-200 dark:border-slate-800 bg-gray-50 dark:bg-slate-950 dark:text-gray-100 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
@@ -800,6 +812,7 @@ function CustomPositionsPage({ user, role, isDarkMode, toggleDarkMode }) {
           <div className="relative flex-1 min-w-[200px]">
             <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
             <input
+              id="pos-search" name="pos-search"
               type="text" placeholder="ค้นหา position หรือ แผนก..."
               value={search} onChange={e => setSearch(e.target.value)}
               className="w-full pl-9 pr-4 py-2 rounded-xl border border-gray-200 dark:border-slate-800 bg-white dark:bg-slate-900 dark:text-gray-100 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
@@ -829,7 +842,7 @@ function CustomPositionsPage({ user, role, isDarkMode, toggleDarkMode }) {
                   <tr>
                     <th className="px-6 py-4 text-[10px] font-black text-gray-400 uppercase tracking-widest">ตำแหน่ง</th>
                     <th className="px-6 py-4 text-[10px] font-black text-gray-400 uppercase tracking-widest">แผนก</th>
-                    <th className="px-6 py-4 text-[10px] font-black text-gray-400 uppercase tracking-widest">Track</th>
+                    <th className="px-6 py-4 text-[10px] font-black text-gray-400 uppercase tracking-widest">Location</th>
                     <th className="px-6 py-4 text-[10px] font-black text-gray-400 uppercase tracking-widest">สร้างโดย</th>
                     <th className="px-6 py-4 text-[10px] font-black text-gray-400 uppercase tracking-widest">วันที่</th>
                     <th className="px-6 py-4 text-[10px] font-black text-gray-400 uppercase tracking-widest text-right">Actions</th>
@@ -882,6 +895,148 @@ function CustomPositionsPage({ user, role, isDarkMode, toggleDarkMode }) {
   )
 }
 
+// ─── Admin: Bulk Clear Tools ─────────────────────────────────────────────────
+function AdminToolsPage({ user, role, isDarkMode, toggleDarkMode }) {
+  const [status, setStatus] = useState({})   // { key: 'idle'|'running'|'done'|'error', count }
+  const [confirm, setConfirm] = useState(null) // key ที่กำลังจะ clear
+
+  async function bulkDeleteCollection(colName) {
+    const snap = await getDocs(collection(db, colName))
+    const batch = writeBatch(db)
+    snap.docs.forEach(d => batch.delete(d.ref))
+    await batch.commit()
+    return snap.size
+  }
+
+  async function runClear(key) {
+    setStatus(s => ({ ...s, [key]: { state: 'running' } }))
+    try {
+      let count = 0
+      if (key === 'auditlog') {
+        count = await bulkDeleteCollection('hc_logs')
+      } else if (key === 'positions') {
+        count = await bulkDeleteCollection('custom_positions')
+      } else if (key === 'jd') {
+        const { data: files } = await listJDFiles()
+        for (const f of files) await deleteJDFile(f.path)
+        count = files.length
+      }
+      setStatus(s => ({ ...s, [key]: { state: 'done', count } }))
+    } catch (err) {
+      console.error('[AdminTools]', key, err)
+      setStatus(s => ({ ...s, [key]: { state: 'error' } }))
+    }
+    setConfirm(null)
+  }
+
+  const TOOLS = [
+    {
+      key: 'auditlog',
+      icon: <Clock size={20} />,
+      label: 'Audit Log',
+      desc: 'ลบประวัติการเปลี่ยนแปลงทั้งหมดใน hc_logs',
+      color: 'text-orange-600 dark:text-orange-400',
+      bg: 'bg-orange-50 dark:bg-orange-900/20',
+      border: 'border-orange-200 dark:border-orange-800',
+    },
+    {
+      key: 'positions',
+      icon: <Tag size={20} />,
+      label: 'Custom Positions',
+      desc: 'ลบ custom positions ทั้งหมดใน Firestore',
+      color: 'text-purple-600 dark:text-purple-400',
+      bg: 'bg-purple-50 dark:bg-purple-900/20',
+      border: 'border-purple-200 dark:border-purple-800',
+    },
+    {
+      key: 'jd',
+      icon: <FileText size={20} />,
+      label: 'JD Files (Supabase)',
+      desc: 'ลบไฟล์ JD PDF ทั้งหมดใน Supabase Storage',
+      color: 'text-red-600 dark:text-red-400',
+      bg: 'bg-red-50 dark:bg-red-900/20',
+      border: 'border-red-200 dark:border-red-800',
+    },
+  ]
+
+  return (
+    <Layout user={user} role={role} isDarkMode={isDarkMode} toggleDarkMode={toggleDarkMode}>
+      <div className="max-w-xl mx-auto py-8 px-4">
+        <div className="flex items-center gap-3 mb-8">
+          <div className="p-2 rounded-xl bg-slate-100 dark:bg-slate-800"><DatabaseZap size={20} className="text-slate-600 dark:text-slate-400"/></div>
+          <div>
+            <h1 className="text-lg font-black text-gray-900 dark:text-gray-100">Admin Tools</h1>
+            <p className="text-xs text-gray-500 dark:text-slate-400">Bulk clear database — ไม่สามารถย้อนกลับได้</p>
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-4">
+          {TOOLS.map(t => {
+            const s = status[t.key]
+            return (
+              <div key={t.key} className={`rounded-2xl border p-5 ${t.bg} ${t.border}`}>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <span className={t.color}>{t.icon}</span>
+                    <div>
+                      <p className={`text-sm font-black ${t.color}`}>{t.label}</p>
+                      <p className="text-xs text-gray-500 dark:text-slate-400 mt-0.5">{t.desc}</p>
+                    </div>
+                  </div>
+                  {s?.state === 'done' ? (
+                    <span className="text-xs font-bold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-900/30 px-3 py-1 rounded-full">
+                      ✓ ลบแล้ว {s.count} รายการ
+                    </span>
+                  ) : s?.state === 'running' ? (
+                    <span className="text-xs font-bold text-gray-500 dark:text-slate-400 flex items-center gap-1.5">
+                      <Settings2 size={13} className="animate-spin"/> กำลังลบ...
+                    </span>
+                  ) : s?.state === 'error' ? (
+                    <span className="text-xs font-bold text-red-600 dark:text-red-400">เกิดข้อผิดพลาด</span>
+                  ) : (
+                    <button
+                      onClick={() => setConfirm(t.key)}
+                      className="flex items-center gap-1.5 text-xs font-black px-3 py-1.5 rounded-xl bg-white dark:bg-slate-800 border border-red-200 dark:border-red-800 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/30 transition-colors shadow-sm"
+                    >
+                      <Trash2 size={12}/> Clear
+                    </button>
+                  )}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+
+        {/* Confirm modal */}
+        {confirm && (() => {
+          const t = TOOLS.find(x => x.key === confirm)
+          return (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+              <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-gray-200 dark:border-slate-700 w-full max-w-sm mx-4 p-6">
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="p-2 rounded-xl bg-red-100 dark:bg-red-900/30"><AlertTriangle size={18} className="text-red-600 dark:text-red-400"/></div>
+                  <div>
+                    <p className="font-black text-gray-900 dark:text-gray-100 text-sm">ยืนยันการลบ {t.label}?</p>
+                    <p className="text-xs text-gray-500 dark:text-slate-400 mt-0.5">การกระทำนี้ไม่สามารถย้อนกลับได้</p>
+                  </div>
+                </div>
+                <div className="flex gap-2 mt-4">
+                  <button onClick={() => setConfirm(null)} className="flex-1 px-4 py-2 text-sm font-bold rounded-xl border border-gray-200 dark:border-slate-700 text-gray-600 dark:text-slate-400 hover:bg-gray-50 dark:hover:bg-slate-800 transition-colors">
+                    ยกเลิก
+                  </button>
+                  <button onClick={() => runClear(confirm)} className="flex-1 px-4 py-2 text-sm font-black rounded-xl bg-red-600 text-white hover:bg-red-700 transition-colors shadow-md shadow-red-500/20">
+                    ลบทั้งหมด
+                  </button>
+                </div>
+              </div>
+            </div>
+          )
+        })()}
+      </div>
+    </Layout>
+  )
+}
+
 // ─── Root App ────────────────────────────────────────────────────────────────
 // Auth flow: Firebase onAuthStateChanged → ดึง role จาก Firestore users collection
 // Dark mode: เก็บใน localStorage → ใส่ class 'dark' ที่ <html> element
@@ -915,10 +1070,9 @@ export default function App() {
     })
   }
 
-  // ─── Realtime listener: อ่านสถานะ maintenance จาก Firestore ───
+  // ─── อ่านสถานะ maintenance ครั้งเดียว (ไม่ต้อง realtime) ───
   useEffect(() => {
-    const ref = doc(db, 'settings', 'maintenance')
-    return onSnapshot(ref, (snap) => {
+    getDoc(doc(db, 'settings', 'maintenance')).then((snap) => {
       if (snap.exists()) {
         setMaintenanceMode(snap.data().active ?? false)
         setMaintenanceMessage(snap.data().message ?? '')
@@ -939,6 +1093,8 @@ export default function App() {
         updatedBy: user?.email,
       })
       await sendMaintenanceAlert(next)
+      setMaintenanceMode(next)
+      setMaintenanceMessage(next ? 'กำลังดำเนินการปรับปรุงระบบ กรุณารอสักครู่' : '')
     } catch (e) {
       console.error('[toggleMaintenance] error:', e)
     }
@@ -1063,6 +1219,23 @@ export default function App() {
           element={
             <RoleGuard role={role} allowed={['admin']} redirectTo="/dashboard">
               <CustomPositionsPage {...pageProps} />
+            </RoleGuard>
+          }
+        />
+
+        <Route
+          path="/admin-tools"
+          element={
+            <RoleGuard role={role} allowed={['admin']} redirectTo="/dashboard">
+              <AdminToolsPage {...pageProps} />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path="/import"
+          element={
+            <RoleGuard role={role} allowed={['admin']} redirectTo="/dashboard">
+              <ImportPage {...pageProps} />
             </RoleGuard>
           }
         />

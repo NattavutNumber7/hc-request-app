@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { collection, addDoc, updateDoc, doc, serverTimestamp, getDocs, query, where } from 'firebase/firestore'
 import { db } from '../../services/firebase'
 import { sendToWebhook } from '../../services/webhook'
@@ -7,14 +7,18 @@ import { uploadJDFile, getJDSignedUrl } from '../../services/supabase'
 import { Loader2, CheckCircle, ChevronDown, X, Paperclip, FileText, ExternalLink } from 'lucide-react'
 import { HQ_JG_LEVELS, OPERATION_JG_LEVELS } from '../../data/jobGrades'
 import { fetchSheetsData, getDepartmentByEmail, getEmployeesByDepartment, getPositionsByDepartment } from '../../services/sheetsData'
+import { DIVISIONS, getDepartments, getSections, getBusinessUnits } from '../../data/orgStructure'
 
 // ─── Default state ของฟอร์ม (reset หลัง submit สำเร็จ) ───
 const INITIAL_FORM = {
-  requestType: 'New HC',
+  requestType: 'Replacement',
+  division: '',
+  department: '',
+  section: '',
+  businessUnit: '',
   position: '',
   orgTrack: '',
   jg: '',
-  department: '',
   headcount: 1,
   requirements: '',
   reason: '',
@@ -22,12 +26,37 @@ const INITIAL_FORM = {
   replacementFor: '',
 }
 
-// ─── กฎการกำหนด Track ตามชื่อแผนก ───
-// Operation-only: Processing Center, DC → lock OPERATION
-// Hybrid: Supply Chain → ให้เลือก HQ / OPERATION
-// อื่นๆ: → lock HQ
-const OPERATION_ONLY_DEPARTMENT_PREFIXES = ['Processing Center', 'Distribution Center']
-const HYBRID_DEPARTMENT_PREFIXES = ['Supply Chain & Operation Strategy']
+// ─── รายชื่อ Department จาก Organization Chart ───
+const DEPARTMENTS = [
+  'Commercial Excellence',
+  'Corporate Lawyer',
+  'Customer Success',
+  'Data Team',
+  'Distribution Center',
+  'Finance & Accounting',
+  'Innovation',
+  'Key Account Management',
+  'Logistic',
+  'Marketing',
+  'Merchandising',
+  'Operations Support',
+  'People Experience',
+  'Portfolio Management',
+  'Procurement',
+  'Product',
+  'Sales Management',
+  'Software Development',
+  'Strategic Finance',
+  'Strategy',
+  'Supply Chain & Operation Strategy',
+  'Supply Chain as a Service',
+]
+
+// ─── กฎการกำหนด Location ตามชื่อแผนก ───
+// OPERATION: Distribution Center เท่านั้น
+// HQ: ทุกแผนกที่เหลือ (รวม Operation division อื่นๆ)
+const OPERATION_ONLY_DEPARTMENT_PREFIXES = ['Distribution Center']
+const HYBRID_DEPARTMENT_PREFIXES = [] // ไม่มี hybrid แล้ว
 
 function matchesDepartmentPrefix(department, prefixes) {
   return prefixes.some((prefix) => department.startsWith(prefix))
@@ -154,7 +183,7 @@ export default function HCRequestForm({ user, role, maintenanceMode = false }) {
   const [positionsByDept, setPositionsByDept] = useState({})
   const [employees, setEmployees] = useState({})
   const [deptAutoFilled, setDeptAutoFilled] = useState(false)
-  const [allDepts, setAllDepts] = useState([])
+  const [allDepts, setAllDepts] = useState(DEPARTMENTS)
   const [jdFile, setJdFile] = useState(null)
   const [uploadProgress, setUploadProgress] = useState('')
   const [customPositions, setCustomPositions] = useState([])
@@ -165,20 +194,22 @@ export default function HCRequestForm({ user, role, maintenanceMode = false }) {
 
   // ─── โหลด Positions + Employees จาก Google Sheets และ auto-fill แผนกของ user ───
   useEffect(() => {
-    fetchSheetsData().then(({ managers, positions: pos, employees: emp }) => {
-      if (pos && typeof pos === 'object') {
-        setPositionsByDept(pos)
-        setAllDepts(Object.keys(pos).sort())
-      }
-      if (emp) setEmployees(emp)
+    fetchSheetsData()
+      .then(({ managers, positions: pos, employees: emp }) => {
+        if (pos && typeof pos === 'object') {
+          setPositionsByDept(pos)
+          setAllDepts(Object.keys(pos).sort())
+        }
+        if (emp) setEmployees(emp)
 
-      const dept = getDepartmentByEmail(managers, user.email)
-      if (dept) {
-        const cfg = getTrackConfigByDepartment(dept)
-        setForm((prev) => ({ ...prev, department: dept, orgTrack: cfg.defaultTrack }))
-        setDeptAutoFilled(true)
-      }
-    })
+        const dept = getDepartmentByEmail(managers, user.email)
+        if (dept) {
+          const cfg = getTrackConfigByDepartment(dept)
+          setForm((prev) => ({ ...prev, department: dept, orgTrack: cfg.defaultTrack }))
+          setDeptAutoFilled(true)
+        }
+      })
+      .catch((err) => console.error('fetchSheetsData error:', err))
   }, [user.email])
 
   // ─── โหลด Custom Positions ที่ถูกสร้างไว้ใน Firestore ตามแผนกที่เลือก ───
@@ -260,11 +291,19 @@ export default function HCRequestForm({ user, role, maintenanceMode = false }) {
     }
   }
 
-  function handleChange(e) {
+  const handleChange = useCallback((e) => {
     const { name, value } = e.target
+    if (name === 'division') {
+      setForm((prev) => ({ ...prev, division: value, department: '', section: '', businessUnit: '', orgTrack: '', jg: '' }))
+      return
+    }
     if (name === 'department') {
       const cfg = getTrackConfigByDepartment(value)
-      setForm((prev) => ({ ...prev, department: value, orgTrack: cfg.defaultTrack, jg: '' }))
+      setForm((prev) => ({ ...prev, department: value, section: '', businessUnit: '', orgTrack: cfg.defaultTrack, jg: '' }))
+      return
+    }
+    if (name === 'section') {
+      setForm((prev) => ({ ...prev, section: value, businessUnit: '' }))
       return
     }
     if (name === 'orgTrack') {
@@ -272,7 +311,7 @@ export default function HCRequestForm({ user, role, maintenanceMode = false }) {
       return
     }
     setForm((prev) => ({ ...prev, [name]: value }))
-  }
+  }, [])
 
   async function handleSubmit(e) {
     e.preventDefault()
@@ -337,7 +376,7 @@ export default function HCRequestForm({ user, role, maintenanceMode = false }) {
       })
 
       setSuccess(true)
-      setForm((prev) => ({ ...INITIAL_FORM, department: prev.department, orgTrack: prev.orgTrack })) // คง department/track ไว้
+      setForm((prev) => ({ ...INITIAL_FORM, division: prev.division, department: prev.department, section: prev.section, orgTrack: prev.orgTrack })) // คง division/department/section ไว้
       setJdFile(null)        // reset ไฟล์ JD หลัง submit สำเร็จ
       setPreviewUrl(null)    // ปิด JD preview
       setTimeout(() => setSuccess(false), 4000)
@@ -351,13 +390,15 @@ export default function HCRequestForm({ user, role, maintenanceMode = false }) {
 
   const trackConfig = getTrackConfigByDepartment(form.department)
   const jgLevels = form.orgTrack === 'OPERATION' ? OPERATION_JG_LEVELS : HQ_JG_LEVELS
-  const customPositionOptions = customPositions
-    .filter((p) => !p.orgTrack || !form.orgTrack || p.orgTrack === form.orgTrack)
-    .map((p) => p.position)
-  const positionOptions = [...new Set([
-    ...getPositionsByDepartment(positionsByDept, form.department),
-    ...customPositionOptions,
-  ])].sort((a, b) => a.localeCompare(b))
+  const positionOptions = useMemo(() => {
+    const custom = customPositions
+      .filter((p) => !p.orgTrack || !form.orgTrack || p.orgTrack === form.orgTrack)
+      .map((p) => p.position)
+    return [...new Set([
+      ...getPositionsByDepartment(positionsByDept, form.department),
+      ...custom,
+    ])].sort((a, b) => a.localeCompare(b))
+  }, [customPositions, positionsByDept, form.department, form.orgTrack])
 
   return (
     <>
@@ -385,7 +426,7 @@ export default function HCRequestForm({ user, role, maintenanceMode = false }) {
           <div>
             <label className="block text-[10px] uppercase font-black text-gray-500 dark:text-slate-500 tracking-widest ml-1 mb-2">ประเภทคำขอ *</label>
             <div className="flex gap-6">
-              {['New HC', 'Replacement'].map((type) => (
+              {['Replacement', 'New HC'].map((type) => (
                 <label key={type} className="flex items-center gap-2.5 cursor-pointer group">
                   <input
                     type="radio"
@@ -401,7 +442,89 @@ export default function HCRequestForm({ user, role, maintenanceMode = false }) {
             </div>
           </div>
 
-          {/* ตำแหน่ง + Track + JG */}
+          {/* Division > Department > Section > Business Unit (cascading) */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {/* Division */}
+            <div>
+              <label className="block text-[10px] uppercase font-black text-gray-500 dark:text-slate-500 tracking-widest ml-1 mb-2">Division *</label>
+              <select
+                name="division"
+                value={form.division}
+                onChange={handleChange}
+                required
+                className="w-full border border-gray-300 dark:border-slate-800 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 bg-white dark:bg-slate-900 dark:text-gray-100 transition-all font-bold"
+              >
+                <option value="">เลือก Division</option>
+                {DIVISIONS.map((d) => (
+                  <option key={d} value={d}>{d}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* Department */}
+            <div>
+              <label className="block text-[10px] uppercase font-black text-gray-500 dark:text-slate-500 tracking-widest ml-1 mb-2">
+                แผนก *
+                {deptAutoFilled && role !== 'admin' && (
+                  <span className="ml-2 bg-emerald-500/10 text-emerald-600 dark:text-emerald-500 px-2 py-0.5 rounded-full text-[9px] uppercase font-black tracking-tighter">Auto Filled</span>
+                )}
+              </label>
+              <select
+                name="department"
+                value={form.department}
+                onChange={handleChange}
+                required
+                disabled={!form.division}
+                className="w-full border border-gray-300 dark:border-slate-800 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 bg-white dark:bg-slate-900 dark:text-gray-100 transition-all font-bold disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <option value="">{form.division ? 'เลือกแผนก' : 'เลือก Division ก่อน'}</option>
+                {getDepartments(form.division).map((d) => (
+                  <option key={d} value={d}>{d}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          {/* Section + Business Unit (แสดงเฉพาะเมื่อมีข้อมูล) */}
+          {form.department && getSections(form.division, form.department).length > 0 && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {/* Section */}
+              <div>
+                <label className="block text-[10px] uppercase font-black text-gray-500 dark:text-slate-500 tracking-widest ml-1 mb-2">Section</label>
+                <select
+                  name="section"
+                  value={form.section}
+                  onChange={handleChange}
+                  className="w-full border border-gray-300 dark:border-slate-800 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 bg-white dark:bg-slate-900 dark:text-gray-100 transition-all font-bold"
+                >
+                  <option value="">เลือก Section (ถ้ามี)</option>
+                  {getSections(form.division, form.department).map((s) => (
+                    <option key={s} value={s}>{s}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Business Unit */}
+              {form.section && getBusinessUnits(form.division, form.department, form.section).length > 0 && (
+                <div>
+                  <label className="block text-[10px] uppercase font-black text-gray-500 dark:text-slate-500 tracking-widest ml-1 mb-2">Business Unit</label>
+                  <select
+                    name="businessUnit"
+                    value={form.businessUnit}
+                    onChange={handleChange}
+                    className="w-full border border-gray-300 dark:border-slate-800 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 bg-white dark:bg-slate-900 dark:text-gray-100 transition-all font-bold"
+                  >
+                    <option value="">เลือก Business Unit (ถ้ามี)</option>
+                    {getBusinessUnits(form.division, form.department, form.section).map((b) => (
+                      <option key={b} value={b}>{b}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ตำแหน่ง + Location + JG */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             {/* ตำแหน่ง */}
             <div className="flex flex-col gap-1.5">
@@ -417,9 +540,9 @@ export default function HCRequestForm({ user, role, maintenanceMode = false }) {
               )}
             </div>
 
-            {/* Track */}
+            {/* Location */}
             <div className="flex flex-col gap-1.5">
-              <label className="text-[10px] uppercase font-black text-gray-500 dark:text-slate-500 tracking-widest ml-1">Track *</label>
+              <label className="text-[10px] uppercase font-black text-gray-500 dark:text-slate-500 tracking-widest ml-1">Location *</label>
               {trackConfig.locked ? (
                 <input
                   type="text"
@@ -435,7 +558,7 @@ export default function HCRequestForm({ user, role, maintenanceMode = false }) {
                   required
                   className="w-full border border-gray-300 dark:border-slate-800 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 bg-white dark:bg-slate-900 dark:text-gray-100 transition-all font-bold"
                 >
-                  <option value="">เลือก Track</option>
+                  <option value="">เลือก Location</option>
                   {trackConfig.options.map((opt) => (
                     <option key={opt} value={opt}>{opt}</option>
                   ))}
@@ -454,43 +577,12 @@ export default function HCRequestForm({ user, role, maintenanceMode = false }) {
                 disabled={!form.orgTrack}
                 className="w-full border border-gray-300 dark:border-slate-800 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 bg-white dark:bg-slate-900 dark:text-gray-100 transition-all font-bold disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                <option value="">{form.orgTrack ? 'เลือก JG' : 'เลือก Track ก่อน'}</option>
+                <option value="">{form.orgTrack ? 'เลือก JG' : 'เลือก Location ก่อน'}</option>
                 {jgLevels.map(({ value, label }) => (
                   <option key={value} value={value}>{label}</option>
                 ))}
               </select>
             </div>
-          </div>
-
-          {/* แผนก (read-only, auto-fill) */}
-          <div>
-            <label className="block text-[10px] uppercase font-black text-gray-500 dark:text-slate-500 tracking-widest ml-1 mb-2">
-              แผนก *
-              {deptAutoFilled && role !== 'admin' && (
-                <span className="ml-2 bg-emerald-500/10 text-emerald-600 dark:text-emerald-500 px-2 py-0.5 rounded-full text-[9px] uppercase font-black tracking-tighter">Auto Filled</span>
-              )}
-            </label>
-            {role === 'admin' ? (
-              <select
-                name="department"
-                value={form.department}
-                onChange={handleChange}
-                required
-                className="w-full border border-gray-300 dark:border-slate-800 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 bg-white dark:bg-slate-900 dark:text-gray-100 transition-all font-bold"
-              >
-                <option value="">เลือกแผนก</option>
-                {allDepts.map((d) => (
-                  <option key={d} value={d}>{d}</option>
-                ))}
-              </select>
-            ) : (
-              <input
-                type="text"
-                value={form.department || 'ไม่พบข้อมูลแผนก'}
-                readOnly
-                className="w-full border border-gray-200 dark:border-slate-800 rounded-xl px-4 py-2.5 text-sm bg-gray-50/50 dark:bg-slate-950/20 text-gray-400 dark:text-slate-600 cursor-not-allowed font-bold"
-              />
-            )}
           </div>
 
           {/* จำนวน HC (เฉพาะ New HC) */}
@@ -522,11 +614,11 @@ export default function HCRequestForm({ user, role, maintenanceMode = false }) {
                   className="w-full border border-gray-300 dark:border-slate-800 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 bg-white dark:bg-slate-900 dark:text-gray-100 transition-all font-bold"
                 >
                   <option value="">เลือกพนักงาน</option>
-                  {getEmployeesByDepartment(employees, form.department).map((name) => (
+                  {getEmployeesByDepartment(employees, form.department, form.section).map((name) => (
                     <option key={name} value={name}>{name}</option>
                   ))}
                 </select>
-                {form.department && getEmployeesByDepartment(employees, form.department).length === 0 && (
+                {form.department && getEmployeesByDepartment(employees, form.department, form.section).length === 0 && (
                   <p className="text-[10px] font-bold text-amber-500 ml-1 mt-1.5 uppercase italic">ไม่พบพนักงานในฐานข้อมูล...</p>
                 )}
               </div>

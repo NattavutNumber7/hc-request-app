@@ -27,7 +27,7 @@ export async function sendMaintenanceAlert(active) {
   }
 }
 
-export async function sendStatusUpdate(docId, status, assignedToName = null, assignedAt = null, startDate = null) {
+export async function sendStatusUpdate(docId, status, assignedToName = null, assignedAt = null, startDate = null, candidateName = null) {
   if (!DATA_URL) {
     console.error('[sendStatusUpdate] VITE_GAS_DATA_URL not configured')
     return
@@ -36,7 +36,8 @@ export async function sendStatusUpdate(docId, status, assignedToName = null, ass
     const params = new URLSearchParams({ action: 'updateStatus', id: docId, status })
     if (assignedToName) params.set('assignedToName', assignedToName)
     if (assignedAt) params.set('assignedAt', assignedAt)
-    if (startDate) params.set('startDate', startDate)  // ส่งวันเริ่มงานตอน Offering
+    if (startDate) params.set('startDate', startDate)
+    if (candidateName) params.set('candidateName', candidateName) // ชื่อ candidate ตอน Onboarding
     const url = `${DATA_URL}?${params.toString()}`
     const res = await fetch(url)
     const json = await res.json()

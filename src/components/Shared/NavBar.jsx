@@ -5,7 +5,7 @@ import { auth } from '../../services/firebase'
 import {
   LogOut, LayoutDashboard, FilePlus, List,
   Briefcase, FolderOpen, ClipboardList, ScrollText, ChevronDown,
-  Moon, Sun, Users, Tag
+  Moon, Sun, Users, Tag, DatabaseZap, Upload
 } from 'lucide-react'
 
 const MANAGER_NAV = [
@@ -28,6 +28,8 @@ const ADMIN_NAV = [
   { path: '/audit-log',    label: 'Audit Log',    icon: ScrollText },
   { path: '/custom-positions', label: 'Positions',    icon: Tag },
   { path: '/users',            label: 'จัดการผู้ใช้', icon: Users },
+  { path: '/admin-tools',      label: 'Admin Tools',  icon: DatabaseZap },
+  { path: '/import',           label: 'Import Data',  icon: Upload },
 ]
 
 const ROLE_LABEL = {
