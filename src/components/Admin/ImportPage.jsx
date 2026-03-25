@@ -43,7 +43,9 @@ export default function ImportPage({ user, role, isDarkMode, toggleDarkMode }) {
     reader.onload = async (e) => {
       try {
         // Dynamic import — โหลด xlsx เฉพาะตอนใช้งานหน้านี้
-        const XLSX = await import('xlsx')
+        // CJS modules ใน Vite อาจ wrap ไว้ใน .default
+        const mod = await import('xlsx')
+        const XLSX = mod.default ?? mod
         const wb = XLSX.read(e.target.result, { type: 'array', cellDates: true })
         const sheetName = wb.SheetNames.find(s => s.toLowerCase().includes('job opening')) || wb.SheetNames[0]
         const ws = wb.Sheets[sheetName]

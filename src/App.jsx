@@ -61,6 +61,7 @@ function RoleSwitcher({ currentRole, onSwitch, currentDept, onDeptSwitch }) {
             type="text"
             value={currentDept}
             onChange={(e) => onDeptSwitch(e.target.value)}
+            id="dev-dept-override" name="dev-dept-override"
             placeholder="Enter Dept..."
             className="w-full px-3 py-2 text-[11px] font-bold rounded-xl border border-gray-100 dark:border-slate-800 bg-gray-50 dark:bg-slate-950 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
           />

@@ -562,6 +562,7 @@ export default function RequestTable({
         <div className="relative flex-1 min-w-48">
           <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 dark:text-slate-500" />
           <input
+            id="rt-search" name="rt-search"
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
@@ -647,11 +648,11 @@ export default function RequestTable({
           </div>
           <div className="flex flex-col gap-1.5">
             <label className="text-[10px] uppercase font-bold text-gray-500 dark:text-slate-500 tracking-wider">วันที่ตั้งแต่</label>
-            <input type="date" value={filterDateFrom} onChange={(e) => setFilterDateFrom(e.target.value)} className="text-sm border border-gray-200 dark:border-slate-800 rounded-xl px-3 py-2 bg-white dark:bg-slate-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-[#00ce7c]/30" />
+            <input id="filter-date-from" name="filter-date-from" type="date" value={filterDateFrom} onChange={(e) => setFilterDateFrom(e.target.value)} className="text-sm border border-gray-200 dark:border-slate-800 rounded-xl px-3 py-2 bg-white dark:bg-slate-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-[#00ce7c]/30" />
           </div>
           <div className="flex flex-col gap-1.5">
             <label className="text-[10px] uppercase font-bold text-gray-500 dark:text-slate-500 tracking-wider">ถึงวันที่</label>
-            <input type="date" value={filterDateTo} onChange={(e) => setFilterDateTo(e.target.value)} className="text-sm border border-gray-200 dark:border-slate-800 rounded-xl px-3 py-2 bg-white dark:bg-slate-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-[#00ce7c]/30" />
+            <input id="filter-date-to" name="filter-date-to" type="date" value={filterDateTo} onChange={(e) => setFilterDateTo(e.target.value)} className="text-sm border border-gray-200 dark:border-slate-800 rounded-xl px-3 py-2 bg-white dark:bg-slate-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-[#00ce7c]/30" />
           </div>
         </div>
       )}
@@ -1107,6 +1108,7 @@ export default function RequestTable({
             <p className="text-sm text-gray-500 dark:text-slate-400 mb-5">เปลี่ยนวันที่ยื่นคำขอเพื่อทดสอบ SLA Badge (Admin only)</p>
             <label className="block text-[10px] font-black text-gray-500 dark:text-slate-500 uppercase tracking-widest mb-2">วันที่ยื่น (createdAt)</label>
             <input
+              id="sla-test-date" name="sla-test-date"
               type="date"
               value={slaTestDate}
               onChange={(e) => setSlaTestDate(e.target.value)}
@@ -1140,6 +1142,7 @@ export default function RequestTable({
 
             <label className="block text-[10px] font-black text-gray-500 dark:text-slate-500 uppercase tracking-widest mb-2">ชื่อ Candidate *</label>
             <input
+              id="offering-candidate" name="offering-candidate"
               type="text"
               value={offeringCandidateName}
               onChange={(e) => setOfferingCandidateName(e.target.value)}
@@ -1150,6 +1153,7 @@ export default function RequestTable({
 
             <label className="block text-[10px] font-black text-gray-500 dark:text-slate-500 uppercase tracking-widest mb-2">วันเริ่มงาน *</label>
             <input
+              id="offering-start-date" name="offering-start-date"
               type="date"
               value={offeringStartDate}
               onChange={(e) => setOfferingStartDate(e.target.value)}
