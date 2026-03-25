@@ -16,6 +16,7 @@ const STATUS_MAP = {
 
 const TYPE_MAP = {
   'replacement': 'Replacement',
+  'replace': 'Replacement',
   'new hc': 'New HC',
   'new': 'New HC',
 }
@@ -38,68 +39,117 @@ export default function ImportPage({ user, role, isDarkMode, toggleDarkMode }) {
   const [done, setDone] = useState(false)
   const fileRef = useRef(null)
 
-  function parseExcel(file) {
+  function processRawRows(raw, file) {
+    console.log('[Import] raw rows:', raw.length, '| sample keys:', raw[0] ? Object.keys(raw[0]) : 'empty')
+
+    const filtered = raw.filter(r => {
+      // รองรับหลาย column name ที่เป็นวันที่เปิด
+      const dt = r['Open Jobs'] || r['Offer Year'] || r['Progress Year'] ||
+                 r['Offering Date'] || r['Start Progress Date'] || ''
+      if (dt instanceof Date) return dt.getFullYear() === 2026
+      if (typeof dt === 'string' && dt) {
+        // "6-Jan-2026", "2026-01-06", "1/6/2026" ฯลฯ
+        return dt.includes('2026')
+      }
+      if (typeof dt === 'number') {
+        // Excel serial date — แปลงเป็น Date แล้วเช็คปี
+        const d = new Date(Math.round((dt - 25569) * 86400 * 1000))
+        return d.getFullYear() === 2026
+      }
+      return false
+    })
+    console.log('[Import] filtered (2026 only):', filtered.length)
+
+    const mapped = filtered.map((r, i) => {
+      const rawStatus = (r['Status'] || '').toString().toLowerCase().trim()
+      // "Job Type" = Replace/New HC, "Emp. Type" = Monthly/Contract (employment)
+      const rawType = (r['Job Type'] || r['Emp. Type'] || '').toString().toLowerCase().trim()
+      const openDate = r['Open Jobs'] || r['Offering Date'] || r['Start Progress Date']
+      const onboardDate = r['Onboard Date'] || r['Onboarded Date'] || ''
+      const createdAt = openDate instanceof Date
+        ? openDate
+        : (typeof openDate === 'string' && openDate ? new Date(openDate) : new Date('2026-01-01'))
+
+      return {
+        _rowNum: i + 1,
+        position: (r['Position'] || r['Positions'] || '').toString().trim(),
+        department: (r['Department'] || '').toString().trim(),
+        section: (r['Business Unit'] || '').toString().trim(),
+        jg: (r['Rank'] || '').toString().trim(),
+        assignedToName: (r['PIC'] || '').toString().trim(),
+        status: STATUS_MAP[rawStatus] || 'Closed',
+        candidateName: (r['Offered Candidate'] || r['Candidate Name-Surname'] || '').toString().trim(),
+        startDate: onboardDate instanceof Date
+          ? onboardDate.toISOString().slice(0, 10)
+          : (typeof onboardDate === 'string' ? onboardDate.slice(0, 10) : ''),
+        requestType: TYPE_MAP[rawType] || 'New HC',
+        hcId: (r['HCID'] || r['HcID'] || '').toString().trim(),
+        createdAt,
+        closedAt: rawStatus === 'onboard'
+          ? (onboardDate instanceof Date ? onboardDate : (onboardDate ? new Date(onboardDate) : createdAt))
+          : null,
+      }
+    }).filter(r => r.position)
+
+    console.log('[Import] mapped rows (non-empty position):', mapped.length)
+    if (mapped.length === 0) console.warn('[Import] ⚠️ 0 rows — ตรวจสอบ column names และ year filter')
+
+    setRows(mapped)
+    setFileName(file.name)
+    setDone(false)
+    setImported(0)
+    setErrors([])
+  }
+
+  function parseFile(file) {
+    const isCsv = file.name.toLowerCase().endsWith('.csv')
+    console.log('[Import] parseFile:', file.name, isCsv ? 'CSV' : 'Excel')
     const reader = new FileReader()
+    reader.onerror = (e) => console.error('[Import] FileReader error:', e)
+
     reader.onload = async (e) => {
       try {
-        // Dynamic import — โหลด xlsx เฉพาะตอนใช้งานหน้านี้
-        // CJS modules ใน Vite อาจ wrap ไว้ใน .default
         const mod = await import('xlsx')
         const XLSX = mod.default ?? mod
-        const wb = XLSX.read(e.target.result, { type: 'array', cellDates: true })
-        const sheetName = wb.SheetNames.find(s => s.toLowerCase().includes('job opening')) || wb.SheetNames[0]
-        const ws = wb.Sheets[sheetName]
-        const raw = XLSX.utils.sheet_to_json(ws, { defval: '' })
 
-        const filtered = raw.filter(r => {
-          const yr = r['Offer Year'] || r['Progress Year'] || ''
-          const dt = r['Offering Date'] || r['Start Progress Date'] || ''
-          if (yr) return String(yr).trim() === '2026'
-          if (dt instanceof Date) return dt.getFullYear() === 2026
-          return false
-        })
+        let raw
+        if (isCsv) {
+          // CSV: parse as string
+          const wb = XLSX.read(e.target.result, { type: 'string', cellDates: true })
+          const ws = wb.Sheets[wb.SheetNames[0]]
+          raw = XLSX.utils.sheet_to_json(ws, { defval: '' })
+          console.log('[Import] CSV sheet:', wb.SheetNames[0])
+        } else {
+          // Excel: pick correct sheet
+          const wb = XLSX.read(e.target.result, { type: 'array', cellDates: true })
+          console.log('[Import] workbook sheets:', wb.SheetNames)
+          const sheetName =
+            wb.SheetNames.find(s => /job opening.*(20\d\d)/i.test(s)) ||
+            wb.SheetNames.find(s => s.toLowerCase().includes('job opening')) ||
+            wb.SheetNames[0]
+          console.log('[Import] using sheet:', sheetName)
+          const ws = wb.Sheets[sheetName]
+          raw = XLSX.utils.sheet_to_json(ws, { defval: '' })
+        }
 
-        const mapped = filtered.map((r, i) => {
-          const rawStatus = (r['Status'] || '').toString().toLowerCase().trim()
-          const rawType = (r['Emp. Type'] || r['Job Type'] || '').toString().toLowerCase().trim()
-          const offerDate = r['Offering Date']
-          const onboardDate = r['Onboard Date']
-          const createdAt = offerDate instanceof Date ? offerDate : new Date('2026-01-01')
-
-          return {
-            _rowNum: i + 1,
-            position: (r['Position'] || r['Positions'] || '').toString().trim(),
-            department: (r['Department'] || '').toString().trim(),
-            section: (r['Business Unit'] || '').toString().trim(),
-            jg: (r['Rank'] || '').toString().trim(),
-            assignedToName: (r['PIC'] || '').toString().trim(),
-            status: STATUS_MAP[rawStatus] || 'Closed',
-            candidateName: (r['Offered Candidate'] || r['Candidate Name-Surname'] || '').toString().trim(),
-            startDate: onboardDate instanceof Date ? onboardDate.toISOString().slice(0, 10) : '',
-            requestType: TYPE_MAP[rawType] || 'New HC',
-            hcId: (r['HCID'] || '').toString().trim(),
-            createdAt,
-            closedAt: rawStatus === 'onboard' ? (onboardDate instanceof Date ? onboardDate : createdAt) : null,
-          }
-        }).filter(r => r.position)
-
-        setRows(mapped)
-        setFileName(file.name)
-        setDone(false)
-        setImported(0)
-        setErrors([])
+        processRawRows(raw, file)
       } catch (err) {
-        console.error('[Import] parse error', err)
+        console.error('[Import] ❌ parse error:', err)
         alert('อ่านไฟล์ไม่ได้: ' + err.message)
       }
     }
-    reader.readAsArrayBuffer(file)
+
+    if (isCsv) {
+      reader.readAsText(file, 'UTF-8')
+    } else {
+      reader.readAsArrayBuffer(file)
+    }
   }
 
   function handleFile(e) {
     const file = e.target.files[0]
     if (!file) return
-    parseExcel(file)
+    parseFile(file)
   }
 
   async function handleImport() {
@@ -158,16 +208,16 @@ export default function ImportPage({ user, role, isDarkMode, toggleDarkMode }) {
           <div className="p-2 rounded-xl bg-blue-50 dark:bg-blue-900/20"><FolderOpen size={20} className="text-blue-600 dark:text-blue-400"/></div>
           <div>
             <h1 className="text-lg font-black text-gray-900 dark:text-gray-100">Import ข้อมูลย้อนหลัง</h1>
-            <p className="text-xs text-gray-500 dark:text-slate-400">รองรับไฟล์ Excel (.xlsx) — Sheet "Job Openings 2025", กรองเฉพาะปี 2026</p>
+            <p className="text-xs text-gray-500 dark:text-slate-400">รองรับ Excel (.xlsx) และ CSV (.csv) — กรองเฉพาะปี 2026</p>
           </div>
         </div>
 
         {!rows.length && !done && (
           <label className="flex flex-col items-center justify-center w-full h-48 border-2 border-dashed border-gray-300 dark:border-slate-700 rounded-2xl cursor-pointer hover:border-blue-400 dark:hover:border-blue-600 hover:bg-blue-50/50 dark:hover:bg-blue-900/10 transition-colors">
             <FolderOpen size={32} className="text-gray-300 dark:text-slate-600 mb-3"/>
-            <p className="text-sm font-bold text-gray-500 dark:text-slate-400">คลิกหรือลากไฟล์ Excel มาวาง</p>
-            <p className="text-xs text-gray-400 dark:text-slate-600 mt-1">.xlsx เท่านั้น</p>
-            <input id="import-file" name="import-file" type="file" accept=".xlsx,.xls" className="hidden" onChange={handleFile} ref={fileRef}/>
+            <p className="text-sm font-bold text-gray-500 dark:text-slate-400">คลิกหรือลากไฟล์มาวาง</p>
+            <p className="text-xs text-gray-400 dark:text-slate-600 mt-1">.xlsx หรือ .csv</p>
+            <input id="import-file" name="import-file" type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleFile} ref={fileRef}/>
           </label>
         )}
 
