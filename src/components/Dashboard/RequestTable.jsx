@@ -24,8 +24,26 @@ const STATUS_TABS = ['ทั้งหมด', 'Open', 'Recruiting', 'Interviewin
 const TA_STATUSES = ['Open', 'Recruiting', 'Interviewing', 'Offering', 'Onboarding', 'Closed']
 const ALL_STATUSES = ['Open', 'Recruiting', 'Interviewing', 'Offering', 'Onboarding', 'Rejected', 'Closed', 'Cancelled']
 
-// คืน list สถานะที่เปลี่ยนได้ → ไม่รวม Open (TA ไม่สามารถย้อนกลับมา Open ได้)
-function getAvailableStatuses(currentStatus) {
+// ค้นหา Email จากชื่อแบบ Dynamic (ตัดชื่อจริงมาเทียบกับ allTAs)
+function getAssignedEmail(req, allTAs = []) {
+  if (req.assignedTo) return req.assignedTo.toLowerCase()
+  if (req.assignedToName) {
+    const rawName = req.assignedToName.toLowerCase().trim()
+    const firstName = rawName.split(/[\s(]/)[0] // e.g. "jitlada (mo)" -> "jitlada"
+    if (firstName.length > 2) {
+      const found = allTAs.find(t => 
+        (t.name && t.name.toLowerCase().includes(firstName)) || 
+        (t.email && t.email.toLowerCase().includes(firstName))
+      )
+      if (found) return found.email.toLowerCase()
+    }
+  }
+  return ''
+}
+
+// คืน list สถานะที่เปลี่ยนได้ → Admin แก้ได้อิสระ, TA ไม่รวม Open
+function getAvailableStatuses(currentStatus, isAdmin = false) {
+  if (isAdmin) return ALL_STATUSES
   const options = TA_STATUSES.filter(s => s !== 'Open')
   if (!options.includes(currentStatus)) return [currentStatus, ...options]
   return options
@@ -492,14 +510,14 @@ export default function RequestTable({
     if (filterMine) base = base.filter(r => r.requesterEmail === user.email)
     if (filterMyCases) {
       base = role === 'admin'
-        ? base.filter(r => Boolean(r.assignedTo))
-        : base.filter(r => r.assignedTo === user.email)
+        ? base.filter(r => Boolean(r.assignedTo) || Boolean(r.assignedToName))
+        : base.filter(r => getAssignedEmail(r, allTAs) === user.email?.toLowerCase() || (r.assignedToName && r.assignedToName === user.displayName))
     }
 
     const counts = { ทั้งหมด: base.length }
     ALL_STATUSES.forEach(s => { counts[s] = base.filter(r => r.status === s).length })
     return counts
-  }, [requests, filterMine, filterMyCases, user.email, role, department])
+  }, [requests, filterMine, filterMyCases, user.email, user.displayName, role, department, allTAs])
 
   // ─── กรองและเรียงข้อมูลสำหรับแสดงในตาราง ───
   // Visibility: manager เห็นเฉพาะของตัวเอง + แผนก, ta/admin เห็นทั้งหมด
@@ -516,8 +534,8 @@ export default function RequestTable({
     if (filterMine) list = list.filter((r) => r.requesterEmail === user.email)
     if (filterMyCases) {
       list = role === 'admin'
-        ? list.filter((r) => Boolean(r.assignedTo))
-        : list.filter((r) => r.assignedTo === user.email)
+        ? list.filter((r) => Boolean(r.assignedTo) || Boolean(r.assignedToName))
+        : list.filter((r) => getAssignedEmail(r, allTAs) === user.email?.toLowerCase() || (r.assignedToName && r.assignedToName === user.displayName))
     }
     if (activeTab !== 'ทั้งหมด') list = list.filter((r) => r.status === activeTab)
     if (filterDept) list = list.filter((r) => r.department === filterDept)
@@ -541,7 +559,7 @@ export default function RequestTable({
       return 0
     })
     return list
-  }, [requests, filterMine, filterMyCases, activeTab, filterDept, filterAssigned, filterDateFrom, filterDateTo, search, sortField, sortDir, user.email, role, department])
+  }, [requests, filterMine, filterMyCases, activeTab, filterDept, filterAssigned, filterDateFrom, filterDateTo, search, sortField, sortDir, user.email, user.displayName, role, department, allTAs])
 
   const hasAdvancedFilters = filterDept || filterAssigned || filterDateFrom || filterDateTo
 
@@ -634,14 +652,14 @@ export default function RequestTable({
         <div className="rounded-2xl border border-gray-200 dark:border-slate-800 p-4 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 bg-gray-50/50 dark:bg-slate-900/50 backdrop-blur-sm transition-all shadow-inner">
           <div className="flex flex-col gap-1.5">
             <label className="text-[10px] uppercase font-bold text-gray-500 dark:text-slate-500 tracking-wider">Department</label>
-            <select value={filterDept} onChange={(e) => setFilterDept(e.target.value)} className="text-sm border border-gray-200 dark:border-slate-800 rounded-xl px-3 py-2 bg-white dark:bg-slate-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-[#00ce7c]/30">
+            <select id="filter-dept" name="filter-dept" value={filterDept} onChange={(e) => setFilterDept(e.target.value)} className="text-sm border border-gray-200 dark:border-slate-800 rounded-xl px-3 py-2 bg-white dark:bg-slate-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-[#00ce7c]/30">
               <option value="">ทั้งหมด</option>
               {departments.map((d) => <option key={d} value={d}>{d}</option>)}
             </select>
           </div>
           <div className="flex flex-col gap-1.5">
             <label className="text-[10px] uppercase font-bold text-gray-500 dark:text-slate-500 tracking-wider">Assigned To</label>
-            <select value={filterAssigned} onChange={(e) => setFilterAssigned(e.target.value)} className="text-sm border border-gray-200 dark:border-slate-800 rounded-xl px-3 py-2 bg-white dark:bg-slate-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-[#00ce7c]/30">
+            <select id="filter-assigned" name="filter-assigned" value={filterAssigned} onChange={(e) => setFilterAssigned(e.target.value)} className="text-sm border border-gray-200 dark:border-slate-800 rounded-xl px-3 py-2 bg-white dark:bg-slate-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-[#00ce7c]/30">
               <option value="">ทั้งหมด</option>
               {assignees.map((a) => <option key={a} value={a}>{a}</option>)}
             </select>
@@ -707,7 +725,7 @@ export default function RequestTable({
                 const canViewFile = req.jdFilePath && (isTA || isOwner)
                 const canCancel = isAdmin || (isTA && req.status !== 'Closed' && req.status !== 'Cancelled') || (isOwner && req.status === 'Open')
                 const canClaim = isTA && req.status === 'Open'
-                const canUpdateStatus = filterMyCases && isTA && req.status !== 'Cancelled' && (req.status !== 'Closed' || isAdmin)
+                const canUpdateStatus = isAdmin || (filterMyCases && isTA && req.status !== 'Cancelled' && req.status !== 'Closed')
                 const canReassign = isTA && (isAdmin || filterMyCases) && req.status !== 'Cancelled' && req.status !== 'Closed' && allTAs.length > 0
                 const isBusy = updating === req.id
 
@@ -787,7 +805,7 @@ export default function RequestTable({
                               }}
                               className="text-[10px] font-bold border border-emerald-500/30 rounded-lg px-2 py-1 bg-white dark:bg-slate-900 text-[#008065] dark:text-emerald-400 focus:outline-none cursor-pointer uppercase tracking-tight"
                             >
-                              {getAvailableStatuses(req.status).map((s) => <option key={s} value={s}>{s}</option>)}
+                              {getAvailableStatuses(req.status, isAdmin).map((s) => <option key={s} value={s}>{s}</option>)}
                             </select>
                           )}
                           {/* Offering / Onboarding → Reject พร้อมเหตุผล */}

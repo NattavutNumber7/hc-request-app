@@ -1,5 +1,5 @@
-import { useState, useRef } from 'react'
-import { doc, collection, writeBatch } from 'firebase/firestore'
+import { useState, useRef, useEffect } from 'react'
+import { doc, collection, writeBatch, getDocs, query, where } from 'firebase/firestore'
 import { db } from '../../services/firebase'
 import { FolderOpen, Plus, Settings2 } from 'lucide-react'
 import Layout from '../Shared/Layout'
@@ -14,14 +14,18 @@ const STATUS_MAP = {
   'rejected': 'Recruiting',
 }
 
-// PIC name → Firestore email (เพิ่มได้เรื่อยๆ)
-const PIC_EMAIL_MAP = {
-  'jitlada (mo)':    'jitlada.m@freshket.co',
-  'jiratcha (belle)': 'jiratcha.a@freshket.co',
-}
-
-function picToEmail(name) {
-  return PIC_EMAIL_MAP[name.toLowerCase().trim()] || ''
+// อ่านจาก Firestore ตรงๆ แทนการ Hardcode
+function getEmailFromPicName(picName, allTAs = []) {
+  if (!picName) return ''
+  const firstName = picName.toLowerCase().trim().split(/[\s(]/)[0]
+  if (firstName.length > 2) {
+    const found = allTAs.find(t => 
+      (t.name && t.name.toLowerCase().includes(firstName)) || 
+      (t.email && t.email.toLowerCase().includes(firstName))
+    )
+    if (found) return found.email.toLowerCase()
+  }
+  return ''
 }
 
 const TYPE_MAP = {
@@ -47,7 +51,15 @@ export default function ImportPage({ user, role, isDarkMode, toggleDarkMode }) {
   const [imported, setImported] = useState(0)
   const [errors, setErrors] = useState([])
   const [done, setDone] = useState(false)
+  const [allTAs, setAllTAs] = useState([])
   const fileRef = useRef(null)
+
+  useEffect(() => {
+    const q = query(collection(db, 'users'), where('role', 'in', ['ta', 'admin']))
+    getDocs(q).then(snap => {
+      setAllTAs(snap.docs.map(d => ({ email: d.id, name: d.data().name })))
+    }).catch(e => console.error('Error fetching TAs for import:', e))
+  }, [])
 
   function processRawRows(raw, file) {
     console.log('[Import] raw rows:', raw.length, '| sample keys:', raw[0] ? Object.keys(raw[0]) : 'empty')
@@ -56,15 +68,16 @@ export default function ImportPage({ user, role, isDarkMode, toggleDarkMode }) {
       // รองรับหลาย column name ที่เป็นวันที่เปิด
       const dt = r['Open Jobs'] || r['Offer Year'] || r['Progress Year'] ||
                  r['Offering Date'] || r['Start Progress Date'] || ''
-      if (dt instanceof Date) return dt.getFullYear() === 2026
+      const YEAR = new Date().getFullYear()
+      if (dt instanceof Date) return dt.getFullYear() === YEAR
       if (typeof dt === 'string' && dt) {
         // "6-Jan-2026", "2026-01-06", "1/6/2026" ฯลฯ
-        return dt.includes('2026')
+        return dt.includes(String(YEAR))
       }
       if (typeof dt === 'number') {
         // Excel serial date — แปลงเป็น Date แล้วเช็คปี
         const d = new Date(Math.round((dt - 25569) * 86400 * 1000))
-        return d.getFullYear() === 2026
+        return d.getFullYear() === YEAR
       }
       return false
     })
@@ -184,7 +197,7 @@ export default function ImportPage({ user, role, isDarkMode, toggleDarkMode }) {
           section: r.section,
           jg: r.jg,
           assignedToName: r.assignedToName,
-          assignedTo: picToEmail(r.assignedToName),
+          assignedTo: getEmailFromPicName(r.assignedToName, allTAs),
           status: r.status,
           candidateName: r.candidateName,
           startDate: r.startDate,
