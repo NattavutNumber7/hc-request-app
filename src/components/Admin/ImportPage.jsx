@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
-import { doc, collection, writeBatch, getDocs, query, where } from 'firebase/firestore'
+import { doc, collection, writeBatch, getDocs, query, where, limit } from 'firebase/firestore'
 import { db } from '../../services/firebase'
 import { FolderOpen, Plus, Settings2 } from 'lucide-react'
 import Layout from '../Shared/Layout'
@@ -15,17 +15,24 @@ const STATUS_MAP = {
 }
 
 // อ่านจาก Firestore ตรงๆ แทนการ Hardcode
+// ลำดับ: exact name → exact email → partial name → partial email
 function getEmailFromPicName(picName, allTAs = []) {
   if (!picName) return ''
-  const firstName = picName.toLowerCase().trim().split(/[\s(]/)[0]
-  if (firstName.length > 2) {
-    const found = allTAs.find(t => 
-      (t.name && t.name.toLowerCase().includes(firstName)) || 
-      (t.email && t.email.toLowerCase().includes(firstName))
-    )
-    if (found) return found.email.toLowerCase()
-  }
-  return ''
+  const name = picName.toLowerCase().trim()
+  const firstName = name.split(/[\s(]/)[0]
+  if (firstName.length <= 2) return ''
+
+  const exact = allTAs.find(t =>
+    (t.name && t.name.toLowerCase() === name) ||
+    (t.email && t.email.toLowerCase().split('@')[0] === firstName)
+  )
+  if (exact) return exact.email.toLowerCase()
+
+  const partial = allTAs.find(t =>
+    (t.name && t.name.toLowerCase().includes(firstName)) ||
+    (t.email && t.email.toLowerCase().includes(firstName))
+  )
+  return partial?.email.toLowerCase() ?? ''
 }
 
 const TYPE_MAP = {
@@ -55,7 +62,7 @@ export default function ImportPage({ user, role, isDarkMode, toggleDarkMode }) {
   const fileRef = useRef(null)
 
   useEffect(() => {
-    const q = query(collection(db, 'users'), where('role', 'in', ['ta', 'admin']))
+    const q = query(collection(db, 'users'), where('role', 'in', ['ta', 'admin']), limit(100))
     getDocs(q).then(snap => {
       setAllTAs(snap.docs.map(d => ({ email: d.id, name: d.data().name })))
     }).catch(e => console.error('Error fetching TAs for import:', e))

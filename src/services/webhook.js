@@ -12,6 +12,24 @@
 const WEBHOOK_URL = import.meta.env.VITE_GAS_WEBHOOK_URL
 const DATA_URL = import.meta.env.VITE_GAS_DATA_URL
 
+// Rate limiting: debounce sendStatusUpdate ต่อ docId 800ms
+// ป้องกัน spam เมื่อ user เปลี่ยน status หลายครั้งเร็วๆ
+const _pending = new Map() // docId → { timer, resolve }
+
+function debouncedStatusCall(docId, fn, delay = 800) {
+  if (_pending.has(docId)) {
+    clearTimeout(_pending.get(docId).timer)
+    _pending.get(docId).resolve('cancelled')
+  }
+  return new Promise((resolve) => {
+    const timer = setTimeout(async () => {
+      _pending.delete(docId)
+      resolve(await fn())
+    }, delay)
+    _pending.set(docId, { timer, resolve })
+  })
+}
+
 /**
  * อัพเดต Status ใน Google Sheets เมื่อมีการเปลี่ยนแปลงใน Web App
  * ใช้ DATA_URL (doGet) แทน WEBHOOK_URL เพราะ updateStatus handler อยู่ใน doGet
@@ -27,24 +45,26 @@ export async function sendMaintenanceAlert(active) {
   }
 }
 
-export async function sendStatusUpdate(docId, status, assignedToName = null, assignedAt = null, startDate = null, candidateName = null) {
+export function sendStatusUpdate(docId, status, assignedToName = null, assignedAt = null, startDate = null, candidateName = null) {
   if (!DATA_URL) {
     console.error('[sendStatusUpdate] VITE_GAS_DATA_URL not configured')
-    return
+    return Promise.resolve()
   }
-  try {
-    const params = new URLSearchParams({ action: 'updateStatus', id: docId, status })
-    if (assignedToName) params.set('assignedToName', assignedToName)
-    if (assignedAt) params.set('assignedAt', assignedAt)
-    if (startDate) params.set('startDate', startDate)
-    if (candidateName) params.set('candidateName', candidateName) // ชื่อ candidate ตอน Onboarding
-    const url = `${DATA_URL}?${params.toString()}`
-    const res = await fetch(url)
-    const json = await res.json()
-    if (!json.success) console.error('[sendStatusUpdate] failed:', json.error)
-  } catch (error) {
-    console.error('[sendStatusUpdate] error:', error)
-  }
+  return debouncedStatusCall(docId, async () => {
+    try {
+      const params = new URLSearchParams({ action: 'updateStatus', id: docId, status })
+      if (assignedToName) params.set('assignedToName', assignedToName)
+      if (assignedAt) params.set('assignedAt', assignedAt)
+      if (startDate) params.set('startDate', startDate)
+      if (candidateName) params.set('candidateName', candidateName)
+      const url = `${DATA_URL}?${params.toString()}`
+      const res = await fetch(url)
+      const json = await res.json()
+      if (!json.success) console.error('[sendStatusUpdate] failed:', json.error)
+    } catch (error) {
+      console.error('[sendStatusUpdate] error:', error)
+    }
+  })
 }
 
 /**

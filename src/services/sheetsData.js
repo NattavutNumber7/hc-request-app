@@ -2,7 +2,7 @@ import { resolveDeptNames } from '../data/deptMapping'
 
 let cache = null
 let cacheTime = null
-const CACHE_TTL_MS = 5 * 60 * 1000 // 5 นาที
+const CACHE_TTL_MS = 15 * 60 * 1000 // 15 นาที
 
 export async function fetchSheetsData() {
   const now = Date.now()

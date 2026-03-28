@@ -1,0 +1,46 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isFreshket() {
+      return request.auth != null && request.auth.token.email.matches('.*@freshket\\.co$');
+    }
+
+    function isAdmin() {
+      return isFreshket() &&
+        get(/databases/$(database)/documents/users/$(request.auth.token.email)).data.role == 'admin';
+    }
+
+    match /users/{userId} {
+      allow read: if isFreshket();
+      allow write: if isAdmin();
+    }
+
+    match /hc_requests/{document=**} {
+      allow read: if isFreshket();
+      allow write: if isFreshket();
+    }
+
+    match /hc_logs/{logId} {
+      allow read: if isFreshket();
+      allow write: if isFreshket();
+    }
+
+    match /audit_logs/{logId} {
+      allow read: if isFreshket();
+      allow write: if isFreshket();
+    }
+
+    match /custom_positions/{docId} {
+      allow read: if isFreshket();
+      allow create: if isFreshket();
+      allow update, delete: if isAdmin();
+    }
+
+    // Maintenance Mode — ทุกคนอ่านได้, admin เท่านั้นเขียนได้
+    match /settings/{docId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+  }
+}

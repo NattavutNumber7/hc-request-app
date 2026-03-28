@@ -127,6 +127,8 @@ export default function RequestTable({
   // Admin: แก้ createdAt เพื่อทดสอบ SLA
   const [slaTestModal, setSlaTestModal] = useState({ isOpen: false, id: null })
   const [slaTestDate, setSlaTestDate] = useState('')
+  const [page, setPage] = useState(1)
+  const PAGE_SIZE = 50
 
   // ─── Realtime listener: ดึง hc_requests จาก Firestore แบบ realtime ───
   // ใช้ Page Visibility API → หยุด listener เมื่อ tab ไม่ active เพื่อลด Firestore reads
@@ -194,7 +196,7 @@ export default function RequestTable({
   // ─── โหลดรายชื่อ TA/Admin สำหรับ dropdown reassign ───
   useEffect(() => {
     if (role === 'admin' || role === 'ta') {
-      const q = query(collection(db, 'users'), where('role', 'in', ['ta', 'admin']))
+      const q = query(collection(db, 'users'), where('role', 'in', ['ta', 'admin']), limit(100))
       getDocs(q).then(snap => {
         setAllTAs(snap.docs.map(d => ({ email: d.id, name: d.data().name || d.id })))
       }).catch(e => console.error('Error fetching TAs:', e))
@@ -565,6 +567,12 @@ export default function RequestTable({
 
   function clearAdvanced() { setFilterDept(''); setFilterAssigned(''); setFilterDateFrom(''); setFilterDateTo('') }
 
+  // reset page เมื่อ filter หรือ tab เปลี่ยน
+  useEffect(() => { setPage(1) }, [activeTab, filterDept, filterAssigned, filterDateFrom, filterDateTo, search, filterMine, filterMyCases])
+
+  const totalPages = Math.ceil(displayed.length / PAGE_SIZE)
+  const paged = displayed.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
+
   if (loading) return (
     <div className="flex items-center justify-center py-20 text-gray-400 gap-2">
       <Loader2 size={20} className="animate-spin text-[#008065]" />
@@ -716,7 +724,7 @@ export default function RequestTable({
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-50 dark:divide-slate-800/50">
-              {displayed.map((req) => {
+              {paged.map((req) => {
                 // ─── Permission flags สำหรับแต่ละแถว ───
                 const isOwner = req.requesterEmail === user.email
                 const isTA = role === 'ta' || role === 'admin'
@@ -1075,6 +1083,34 @@ export default function RequestTable({
               })}
             </tbody>
           </table>
+
+          {/* Pagination */}
+          {totalPages > 1 && (
+            <div className="flex items-center justify-between px-4 py-3 border-t border-gray-100 dark:border-slate-800 bg-gray-50/50 dark:bg-slate-900/50">
+              <span className="text-xs text-gray-400 dark:text-slate-500 font-medium">
+                {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, displayed.length)} จาก {displayed.length} รายการ
+              </span>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => setPage(p => Math.max(1, p - 1))}
+                  disabled={page === 1}
+                  className="px-3 py-1.5 text-xs font-bold rounded-lg border border-gray-200 dark:border-slate-700 text-gray-600 dark:text-slate-400 hover:bg-gray-100 dark:hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                >
+                  ← ก่อนหน้า
+                </button>
+                <span className="px-3 py-1.5 text-xs font-bold text-gray-500 dark:text-slate-400">
+                  {page} / {totalPages}
+                </span>
+                <button
+                  onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                  disabled={page === totalPages}
+                  className="px-3 py-1.5 text-xs font-bold rounded-lg border border-gray-200 dark:border-slate-700 text-gray-600 dark:text-slate-400 hover:bg-gray-100 dark:hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                >
+                  ถัดไป →
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
       <ConfirmModal
