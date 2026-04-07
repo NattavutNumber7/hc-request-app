@@ -1,10 +1,90 @@
+/**
+ * @file RequestTable.jsx — ตารางคำขอ HC หลัก (Core HC Request Data Table)
+ * ─────────────────────────────────────────────────────────────────────────────
+ * คอมโพเนนต์หลักของระบบ HC Request สำหรับแสดง, กรอง, จัดเรียง และจัดการ
+ * คำขออัตรากำลัง (Headcount Request) ทั้งหมดแบบ realtime
+ *
+ * The core data table component of the HC Request system — renders, filters,
+ * sorts, paginates, and manages all headcount request records in real time.
+ *
+ * ── DATA SOURCE ───────────────────────────────────────────────────────────────
+ *   - Firestore collection `hc_requests` via `onSnapshot` (realtime listener)
+ *   - Query: orderBy createdAt DESC, limit 500
+ *   - Page Visibility API: หยุด listener เมื่อ tab ถูกซ่อน / resume เมื่อกลับมา
+ *     (pauses the listener when the browser tab is hidden, resumes on focus)
+ *
+ * ── SLA CALCULATION — getDaysOpen ─────────────────────────────────────────────
+ *   Business rules สำหรับนับวันที่เปิดอยู่:
+ *   - สถานะ Offering / Onboarding → หยุดนับ (timer paused)
+ *   - กลับจาก Onboarding → Recruiting → รีเซ็ตนับใหม่ (counter resets)
+ *   - สถานะอื่น → นับตาม createdAt ตามปกติ
+ *
+ * ── STATUS TABS ───────────────────────────────────────────────────────────────
+ *   ทั้งหมด | Open | Recruiting | Interviewing | Offering |
+ *   Onboarding | Rejected | Closed | Cancelled
+ *
+ * ── FILTERING ─────────────────────────────────────────────────────────────────
+ *   - แผนก (department), ผู้รับผิดชอบ (assignee), ช่วงวันที่ (date range)
+ *   - ค้นหาข้อความ (search text), focusTA (จาก TAWorkloadPanel),
+ *     focusMonth (จาก MonthlyPipeline)
+ *
+ * ── SORTING ───────────────────────────────────────────────────────────────────
+ *   คลิก header เพื่อ sort: position, department, assignedToName,
+ *   createdAt, status
+ *
+ * ── PAGINATION ────────────────────────────────────────────────────────────────
+ *   PAGE_SIZE = 50 rows per page
+ *
+ * ── ACTION HANDLERS ───────────────────────────────────────────────────────────
+ *   handleClaim           — TA รับเคส (claim a request)
+ *   handleCancel          — ยกเลิกคำขอ
+ *   handleStatusChange    — เปลี่ยนสถานะทั่วไป
+ *   handleOfferingConfirm — เปลี่ยนเป็น Onboarding พร้อม startDate + candidateName
+ *   handleRejectConfirm   — ปฏิเสธพร้อมเหตุผล (reject with reason)
+ *   handleReopen          — คืนสถานะ Rejected → Recruiting
+ *   handleReassign        — มอบหมาย TA ใหม่
+ *   handleDelete          — ลบ (admin only): ลบ JD จาก Supabase + ลบ doc จาก Firestore
+ *
+ * ── CV MANAGEMENT ─────────────────────────────────────────────────────────────
+ *   handleCVUpload  — อัปโหลด CV ผ่าน Supabase Storage
+ *   handleDeleteCV  — ลบ CV ออกจาก Supabase Storage
+ *
+ * ── MODALS ────────────────────────────────────────────────────────────────────
+ *   offeringModal  — ยืนยัน Onboarding (startDate + candidateName)
+ *   rejectModal    — ยืนยันการปฏิเสธพร้อมเหตุผล
+ *   slaTestModal   — (admin) เปลี่ยน createdAt เพื่อทดสอบ SLA
+ *   ConfirmModal   — ยืนยันการกระทำที่ไม่สามารถย้อนกลับได้ (destructive actions)
+ *
+ * ── PERMISSION FLAGS (per row) ────────────────────────────────────────────────
+ *   canClaim, canCancel, canUpdateStatus, canReassign,
+ *   isOwner, isTA, isAdmin
+ *
+ * ── VISIBILITY RULES ──────────────────────────────────────────────────────────
+ *   - Manager: เห็นเฉพาะคำขอของตนเองและแผนกเดียวกัน
+ *   - TA: เห็นทั้งหมด (หรือกรองตาม department prop ถ้าระบุ)
+ *   - Admin: เห็นทั้งหมด
+ *
+ * @module RequestTable
+ *
+ * @param {Object}        props
+ * @param {Object}        props.user           - Firestore user document ของผู้ใช้ปัจจุบัน
+ * @param {string}        props.role           - 'admin' | 'ta' | 'manager'
+ * @param {string}        [props.department]   - กรองเฉพาะแผนก (TA view แบบ dept-scoped)
+ * @param {Function}      [props.onStatsChange]- callback(stats) เมื่อข้อมูลสรุปเปลี่ยน
+ * @param {boolean}       [props.filterMine]   - แสดงเฉพาะคำขอของตนเอง
+ * @param {boolean}       [props.filterMyCases]- แสดงเฉพาะ case ที่ TA รับผิดชอบ
+ * @param {boolean}       [props.showFilters]  - แสดง/ซ่อน filter bar
+ * @param {string|null}   [props.focusTA]      - กรองตาม TA ที่เลือกจาก TAWorkloadPanel
+ * @param {string|null}   [props.focusMonth]   - กรองตามเดือนที่เลือกจาก MonthlyPipeline
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
 import { useEffect, useState, useMemo, useCallback, Fragment } from 'react'
-import { collection, onSnapshot, orderBy, query, doc, updateDoc, getDocs, where, deleteDoc, serverTimestamp, arrayUnion, limit, Timestamp } from 'firebase/firestore'
+import { collection, onSnapshot, orderBy, query, doc, updateDoc, getDocs, where, deleteDoc, serverTimestamp, arrayUnion, arrayRemove, limit, Timestamp } from 'firebase/firestore'
 import { db } from '../../services/firebase'
 import { sendStatusUpdate } from '../../services/webhook'
 import { logAudit } from '../../services/auditLog'
-import { Loader2, UserCheck, XCircle, ChevronUp, ChevronDown, ChevronsUpDown, SlidersHorizontal, X, FileText, Search, ChevronRight, Users, Calendar, AlignLeft, ClipboardList, Pencil, Trash2 } from 'lucide-react'
-import { getJDSignedUrl, deleteJDFile } from '../../services/supabase'
+import { Loader2, UserCheck, XCircle, ChevronUp, ChevronDown, ChevronsUpDown, SlidersHorizontal, X, FileText, Search, ChevronRight, Users, Calendar, AlignLeft, ClipboardList, Pencil, Trash2, Upload, File } from 'lucide-react'
+import { getJDSignedUrl, deleteJDFile, uploadCVFile, getCVSignedUrl, deleteCVFile } from '../../services/supabase'
 import ConfirmModal from '../Shared/ConfirmModal'
 
 // ─── สี Badge ของแต่ละสถานะ (light + dark mode) ───
@@ -58,20 +138,69 @@ function StatusBadge({ status }) {
   )
 }
 
-// ─── คำนวณวันที่ใช้ตั้งแต่ Open จนถึงปัจจุบัน (หรือ closedAt) ───
+// ─── คำนวณ Effective SLA Days ตาม business rules ───
+// กฎ:
+//   - Offering / Onboarding → pause (ไม่นับเวลาช่วงนี้)
+//   - กลับจาก Offering → Recruiting/Interviewing → resume ต่อ (ไม่ reset)
+//   - กลับจาก Onboarding → Recruiting → RESET เริ่มนับใหม่
 function getDaysOpen(req) {
-  const created = req.createdAt?.toDate?.()
-  if (!created) return null
-  const end = req.closedAt?.toDate?.() || new Date()
-  return Math.floor((end - created) / (1000 * 60 * 60 * 24))
+  const createdAt = req.createdAt?.toDate?.()
+  if (!createdAt) return null
+
+  const DONE = new Set(['Closed', 'Cancelled'])
+
+  const history = [...(req.statusHistory ?? [])]
+    .map(e => ({ status: e.status, t: new Date(e.changedAt) }))
+    .filter(e => !isNaN(e.t))
+    .sort((a, b) => a.t - b.t)
+
+  let accumulated = 0        // ms สะสม
+  let activeStart = createdAt
+  // flag: ครั้งล่าสุดที่หยุดนับเป็นเพราะ Onboarding (ไม่ใช่ Offering)
+  // ใช้ detect reset แม้ว่าจะผ่าน Rejected ก่อนกลับมา Recruiting
+  let lastPauseWasOnboarding = false
+
+  for (const { status, t } of history) {
+    if (status === 'Offering') {
+      if (activeStart) { accumulated += t - activeStart; activeStart = null }
+      lastPauseWasOnboarding = false
+    } else if (status === 'Onboarding') {
+      if (activeStart) { accumulated += t - activeStart; activeStart = null }
+      lastPauseWasOnboarding = true   // mark: pause เพราะ Onboarding
+    } else if (status === 'Recruiting' || status === 'Interviewing') {
+      if (lastPauseWasOnboarding) {
+        // RESET: Onboarding → (Rejected?) → Recruiting → เริ่มนับใหม่
+        accumulated = 0
+        activeStart = t
+        lastPauseWasOnboarding = false
+      } else if (!activeStart) {
+        // RESUME: กลับจาก Offering reject
+        activeStart = t
+      }
+      // activeStart มีอยู่แล้ว → นับต่อ
+    } else if (DONE.has(status)) {
+      if (activeStart) { accumulated += t - activeStart; activeStart = null }
+      lastPauseWasOnboarding = false
+    }
+    // Rejected / Open: ไม่ทำอะไร — ปล่อย state เดิมดำเนินต่อ
+  }
+
+  if (activeStart) accumulated += new Date() - activeStart
+  return Math.floor(accumulated / (1000 * 60 * 60 * 24))
 }
 
-// แสดงป้าย SLA: 🔴 >30วัน 🟡 15-30วัน 🟢 <15วัน
+// แสดงป้าย SLA: ⏸ pause | 🔴 >30วัน | 🟡 15-30วัน | 🟢 <15วัน
 function SLABadge({ req }) {
   const days = getDaysOpen(req)
   if (days === null) return null
-  const done = ['Closed', 'Cancelled'].includes(req.status)
+  const done   = ['Closed', 'Cancelled'].includes(req.status)
+  const paused = ['Offering', 'Onboarding'].includes(req.status)
   if (done) return <span className="text-[10px] text-slate-400 dark:text-slate-600 font-mono">{days}d</span>
+  if (paused) return (
+    <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-lg text-[10px] font-bold border text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-800/50 border-slate-200 dark:border-slate-700">
+      ⏸ {days}d
+    </span>
+  )
   const style = days > 30
     ? 'text-red-600 bg-red-50 dark:bg-red-500/10 border-red-200 dark:border-red-500/20'
     : days > 15
@@ -100,6 +229,8 @@ function SortIcon({ field, sortField, sortDir }) {
 export default function RequestTable({
   user, role, department, onStatsChange,
   filterMine = false, filterMyCases = false, showFilters = false,
+  focusTA = null,    // ชื่อ TA ที่ต้องการ filter (จาก TAWorkloadPanel)
+  focusMonth = null, // "YYYY-MM" filter จาก MonthlyPipeline
 }) {
   const [requests, setRequests] = useState([])
   const [loading, setLoading] = useState(true)
@@ -120,6 +251,8 @@ export default function RequestTable({
   // Onboarding modal: กรอกวันเริ่มงานก่อนเปลี่ยนสถานะ
   const [offeringModal, setOfferingModal] = useState({ isOpen: false, id: null })
   const [offeringStartDate, setOfferingStartDate] = useState('')
+  const [candidateEditId, setCandidateEditId] = useState(null)   // id ที่กำลัง edit
+  const [candidateEditVal, setCandidateEditVal] = useState('')   // ค่าที่กำลังพิมพ์
   const [offeringCandidateName, setOfferingCandidateName] = useState('')
   // Reject modal: กรอกเหตุผลก่อน Reject
   const [rejectModal, setRejectModal] = useState({ isOpen: false, id: null })
@@ -129,6 +262,13 @@ export default function RequestTable({
   const [slaTestDate, setSlaTestDate] = useState('')
   const [page, setPage] = useState(1)
   const PAGE_SIZE = 50
+  const [cvUploading, setCvUploading] = useState(new Set()) // Set ของ reqId ที่กำลัง upload
+
+  // ─── Sync filterAssigned เมื่อ focusTA เปลี่ยน (จาก TAWorkloadPanel) ───
+  useEffect(() => {
+    setFilterAssigned(focusTA ?? '')
+    setPage(1)
+  }, [focusTA])
 
   // ─── Realtime listener: ดึง hc_requests จาก Firestore แบบ realtime ───
   // ใช้ Page Visibility API → หยุด listener เมื่อ tab ไม่ active เพื่อลด Firestore reads
@@ -287,35 +427,29 @@ export default function RequestTable({
     setOfferingCandidateName('')
   }
 
-  // Reject confirm: บันทึก Rejected → ย้ายไป Recruiting อัตโนมัติ (TA คนเดิม)
+  // Reject confirm: บันทึก Rejected (หยุดที่ Rejected → TA กด "Recruit ใหม่" เองเมื่อพร้อม)
   async function handleRejectConfirm() {
     if (!rejectModal.id) return
     const req = requests.find((r) => r.id === rejectModal.id)
     try {
-      // Step 1: บันทึก Rejected พร้อมเหตุผล
       await updateDoc(doc(db, 'hc_requests', rejectModal.id), {
         status: 'Rejected',
         rejectReason: rejectReason.trim() || 'ไม่ระบุเหตุผล',
         rejectedAt: serverTimestamp(),
+        startDate: '',
         statusHistory: arrayUnion(buildHistoryEntry('Rejected', user)),
       })
-      // Step 2: ย้ายไป Recruiting ทันที (TA คนเดิม ไม่ reset assignedTo)
-      await updateDoc(doc(db, 'hc_requests', rejectModal.id), {
-        status: 'Recruiting',
-        startDate: '',
-        statusHistory: arrayUnion(buildHistoryEntry('Recruiting', user)),
-      })
-      sendStatusUpdate(rejectModal.id, 'Recruiting', req?.assignedToName)
+      sendStatusUpdate(rejectModal.id, 'Rejected', req?.assignedToName)
       logAudit({
         requestId: rejectModal.id,
         action: 'Rejected',
         by: user.email,
         byName: user.displayName,
         fromStatus: req?.status,
-        toStatus: 'Recruiting',
+        toStatus: 'Rejected',
         position: req?.position,
         department: req?.department,
-        note: `Rejected → Recruiting (${rejectReason.trim() || 'ไม่ระบุเหตุผล'})`,
+        note: `Rejected (${rejectReason.trim() || 'ไม่ระบุเหตุผล'})`,
       })
     } catch (err) {
       console.error('[handleRejectConfirm]', err)
@@ -337,22 +471,45 @@ export default function RequestTable({
     }
   }
 
-  // Rejected → เปิด recruit ใหม่ (ย้อนกลับเป็น Open)
+  // ─── CV Upload / Delete ───
+  async function handleCVUpload(reqId, file) {
+    if (!file) return
+    setCvUploading((prev) => new Set([...prev, reqId]))
+    try {
+      const result = await uploadCVFile(file, reqId)
+      if (result.error) { alert(result.error); return }
+      await updateDoc(doc(db, 'hc_requests', reqId), {
+        cvFiles: arrayUnion({ name: file.name, path: result.path, uploadedBy: user.email, uploadedAt: new Date().toISOString() }),
+      })
+    } catch (err) {
+      console.error('[handleCVUpload]', err)
+      alert('อัพโหลดไม่สำเร็จ: ' + err.message)
+    } finally {
+      setCvUploading((prev) => { const s = new Set(prev); s.delete(reqId); return s })
+    }
+  }
+
+  async function handleDeleteCV(reqId, cvEntry) {
+    await deleteCVFile(cvEntry.path)
+    await updateDoc(doc(db, 'hc_requests', reqId), { cvFiles: arrayRemove(cvEntry) })
+  }
+
+  // Rejected → Recruiting ใหม่
   async function handleReopen(id) {
     const req = requests.find((r) => r.id === id)
     try {
-      await updateDoc(doc(db, 'hc_requests', id), { status: 'Open', startDate: '', rejectedAt: null, statusHistory: arrayUnion(buildHistoryEntry('Open', user)) })
-      sendStatusUpdate(id, 'Open', req.assignedToName)
+      await updateDoc(doc(db, 'hc_requests', id), { status: 'Recruiting', startDate: '', rejectedAt: null, statusHistory: arrayUnion(buildHistoryEntry('Recruiting', user)) })
+      sendStatusUpdate(id, 'Recruiting', req.assignedToName)
       logAudit({
         requestId: id,
         action: 'Reopen',
         by: user.email,
         byName: user.displayName,
         fromStatus: 'Rejected',
-        toStatus: 'Open',
+        toStatus: 'Recruiting',
         position: req?.position,
         department: req?.department,
-        note: 'ผู้สมัครไม่มารายงานตัว — เปิด recruit ใหม่',
+        note: 'Rejected → Recruiting ใหม่',
       })
     } catch (err) {
       console.error('[handleReopen]', err)
@@ -544,6 +701,14 @@ export default function RequestTable({
     if (filterAssigned) list = list.filter((r) => r.assignedToName === filterAssigned)
     if (filterDateFrom) list = list.filter((r) => r.createdAt?.toDate?.() >= new Date(filterDateFrom))
     if (filterDateTo) { const to = new Date(filterDateTo); to.setHours(23, 59, 59); list = list.filter((r) => r.createdAt?.toDate?.() <= to) }
+    if (focusMonth) {
+      list = list.filter(r => {
+        const d = r.createdAt?.toDate?.()
+        if (!d) return false
+        const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+        return key === focusMonth
+      })
+    }
     if (search) {
       const q = search.toLowerCase()
       list = list.filter((r) =>
@@ -906,7 +1071,57 @@ export default function RequestTable({
                                 </p>
                                 <p className="text-xl font-black text-[#008065] dark:text-emerald-500 tabular-nums">{req.headcount ?? 1} <span className="text-sm font-bold text-gray-400">คน</span></p>
                               </div>
-                              {req.candidateName && (
+                              {/* Candidate name — editable inline สำหรับ TA/Admin */}
+                              {(isTA || isAdmin) && (
+                                <div>
+                                  <p className="text-[10px] font-black text-gray-400 dark:text-slate-600 uppercase tracking-widest flex items-center gap-1.5 mb-2">
+                                    <UserCheck size={12} strokeWidth={3} /> Candidate
+                                  </p>
+                                  {candidateEditId === req.id ? (
+                                    <div className="flex items-center gap-1.5">
+                                      <input
+                                        autoFocus
+                                        value={candidateEditVal}
+                                        onChange={e => setCandidateEditVal(e.target.value)}
+                                        onKeyDown={async e => {
+                                          if (e.key === 'Enter') {
+                                            await updateDoc(doc(db, 'hc_requests', req.id), { candidateName: candidateEditVal.trim() })
+                                            sendStatusUpdate(req.id, req.status, req.assignedToName, null, req.startDate, candidateEditVal.trim())
+                                            setCandidateEditId(null)
+                                          } else if (e.key === 'Escape') {
+                                            setCandidateEditId(null)
+                                          }
+                                        }}
+                                        placeholder="ชื่อ Candidate..."
+                                        className="flex-1 text-sm border border-indigo-200 dark:border-indigo-700 rounded-lg px-2 py-1 bg-white dark:bg-slate-900 text-indigo-700 dark:text-indigo-300 focus:outline-none focus:ring-1 focus:ring-indigo-400 min-w-0"
+                                      />
+                                      <button
+                                        onClick={async () => {
+                                          await updateDoc(doc(db, 'hc_requests', req.id), { candidateName: candidateEditVal.trim() })
+                                          sendStatusUpdate(req.id, req.status, req.assignedToName, null, req.startDate, candidateEditVal.trim())
+                                          setCandidateEditId(null)
+                                        }}
+                                        className="text-[10px] font-black px-2 py-1 rounded-lg bg-indigo-500 text-white hover:bg-indigo-600 transition-colors shrink-0"
+                                      >
+                                        ✓
+                                      </button>
+                                      <button onClick={() => setCandidateEditId(null)} className="text-[10px] text-gray-400 hover:text-gray-600 shrink-0">✕</button>
+                                    </div>
+                                  ) : (
+                                    <button
+                                      onClick={() => { setCandidateEditId(req.id); setCandidateEditVal(req.candidateName || '') }}
+                                      className="flex items-center gap-1.5 group text-left"
+                                    >
+                                      {req.candidateName
+                                        ? <span className="text-sm font-extrabold text-indigo-600 dark:text-indigo-400">{req.candidateName}</span>
+                                        : <span className="text-xs text-gray-300 dark:text-slate-700 italic">— กดเพื่อกรอกชื่อ</span>
+                                      }
+                                      <Pencil size={10} strokeWidth={2.5} className="text-gray-300 dark:text-slate-700 group-hover:text-indigo-400 transition-colors shrink-0" />
+                                    </button>
+                                  )}
+                                </div>
+                              )}
+                              {!isTA && !isAdmin && req.candidateName && (
                                 <div>
                                   <p className="text-[10px] font-black text-gray-400 dark:text-slate-600 uppercase tracking-widest flex items-center gap-1.5 mb-2">
                                     <UserCheck size={12} strokeWidth={3} /> Candidate
@@ -994,6 +1209,62 @@ export default function RequestTable({
                               )}
                             </div>
                           </div>
+
+                          {/* ── CV Files — TA อัพโหลด/ลบได้, Owner (manager) ดูอย่างเดียว ── */}
+                          {(isTA || isOwner) && (
+                            <div className="mt-4 border border-gray-100 dark:border-slate-800 rounded-2xl p-4 bg-white dark:bg-slate-900">
+                              <div className="flex items-center justify-between mb-3">
+                                <p className="text-[10px] font-black text-gray-400 dark:text-slate-600 uppercase tracking-widest flex items-center gap-1.5">
+                                  <File size={12} strokeWidth={3} /> CV / Resume
+                                </p>
+                                {isTA && (
+                                  <label className={`flex items-center gap-1.5 cursor-pointer text-[10px] font-black uppercase tracking-wider px-3 py-1.5 rounded-lg border-2 transition-all ${cvUploading.has(req.id) ? 'opacity-50 pointer-events-none' : 'border-emerald-500/30 text-emerald-600 dark:text-emerald-400 hover:border-emerald-500 hover:bg-emerald-50 dark:hover:bg-emerald-950/30'}`}>
+                                    {cvUploading.has(req.id)
+                                      ? <><Loader2 size={12} strokeWidth={3} className="animate-spin" /> กำลังอัพโหลด...</>
+                                      : <><Upload size={12} strokeWidth={3} /> อัพโหลด CV</>
+                                    }
+                                    <input
+                                      type="file"
+                                      className="hidden"
+                                      accept=".pdf,.doc,.docx"
+                                      onClick={(e) => e.stopPropagation()}
+                                      onChange={(e) => { e.stopPropagation(); handleCVUpload(req.id, e.target.files[0]); e.target.value = '' }}
+                                    />
+                                  </label>
+                                )}
+                              </div>
+                              {(!req.cvFiles || req.cvFiles.length === 0) ? (
+                                <p className="text-xs text-gray-400 dark:text-slate-600 italic">ยังไม่มีไฟล์ CV</p>
+                              ) : (
+                                <div className="flex flex-col gap-1.5">
+                                  {req.cvFiles.map((cv, idx) => (
+                                    <div key={idx} className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-gray-50 dark:bg-slate-800/60 border border-gray-100 dark:border-slate-800 group">
+                                      <button
+                                        onClick={async (e) => { e.stopPropagation(); const url = await getCVSignedUrl(cv.path); if (url) window.open(url, '_blank') }}
+                                        className="flex items-center gap-2 text-xs font-bold text-gray-700 dark:text-slate-300 hover:text-emerald-600 dark:hover:text-emerald-400 transition-colors truncate"
+                                        title={cv.name}
+                                      >
+                                        <FileText size={13} strokeWidth={2.5} className="shrink-0 text-emerald-500" />
+                                        <span className="truncate max-w-[200px]">{cv.name}</span>
+                                      </button>
+                                      <div className="flex items-center gap-2 shrink-0">
+                                        <span className="text-[10px] text-gray-400 dark:text-slate-600 hidden group-hover:inline">{cv.uploadedBy?.split('@')[0]}</span>
+                                        {isTA && (
+                                          <button
+                                            onClick={(e) => { e.stopPropagation(); handleDeleteCV(req.id, cv) }}
+                                            className="text-gray-300 dark:text-slate-700 hover:text-red-500 transition-colors"
+                                            title="ลบไฟล์"
+                                          >
+                                            <X size={13} strokeWidth={3} />
+                                          </button>
+                                        )}
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          )}
 
                           {/* ── Stage Duration (simplified: Open → Offering → Close/Reject) ── */}
                           {req.statusHistory?.length > 0 && (() => {

@@ -1,3 +1,26 @@
+/**
+ * JDFilesPage.jsx — JD Files management page
+ * ─────────────────────────────────────────────────────────────────────────────
+ * หน้าแสดงและจัดการไฟล์ Job Description (JD) ทั้งหมดที่อัปโหลดเข้าระบบ
+ * ดึงรายการไฟล์จาก Supabase Storage และ map กับข้อมูล HC Request จาก Firestore
+ * เพื่อแสดงชื่อตำแหน่งและแผนกแทนชื่อ folder
+ *
+ * การ map ไฟล์ → HC Request:
+ *   - folder name ของไฟล์ใน Storage = Firestore doc ID ของ hc_requests
+ *   - ไฟล์เก่าที่ใช้ tmp_* folder จะ fallback ไป index ด้วย jdFilePath แทน
+ *
+ * Props:
+ *   user          {object}   Firebase user object ของผู้ใช้ที่ login อยู่
+ *   role          {string}   role ของผู้ใช้ ('admin' เท่านั้นที่ลบไฟล์ได้)
+ *   isDarkMode    {boolean}  สถานะ dark mode
+ *   toggleDarkMode {function} toggle dark/light mode
+ *
+ * Notes:
+ *   - การลบไฟล์จะลบใน Supabase Storage พร้อมกัน clear field ใน Firestore doc ด้วย
+ *   - folder ที่ขึ้นต้นด้วย tmp_ ไม่ใช่ Firestore doc ID จึงข้ามการ clear Firestore
+ *   - ใช้ cancelled flag ใน useEffect เพื่อป้องกัน setState หลัง unmount
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
 import { useEffect, useState } from 'react'
 import { collection, getDocs, query, doc, updateDoc, deleteField } from 'firebase/firestore'
 import { db } from '../services/firebase'
@@ -15,18 +38,21 @@ export default function JDFilesPage({ user, role, isDarkMode, toggleDarkMode }) 
   const [confirmState, setConfirmState] = useState({ isOpen: false, file: null })
 
   useEffect(() => {
+    // cancelled flag ป้องกัน setState เมื่อ component unmount ก่อน fetch เสร็จ
     let cancelled = false
     async function load() {
       const { data } = await listJDFiles()
       if (cancelled) return
 
       try {
+        // ดึง hc_requests ทั้งหมดมา build lookup map เพื่อแสดงชื่อตำแหน่ง/แผนก
         const qReq = query(collection(db, 'hc_requests'))
         const snap = await getDocs(qReq)
         if (cancelled) return
         const map = {}
         snap.forEach(d => {
           const data = d.data()
+          // index ด้วย doc ID หลัก
           map[d.id] = data
           // index ด้วย folder จาก jdFilePath ด้วย (รองรับไฟล์เก่าที่ใช้ tmp_* folder)
           if (data.jdFilePath) {
@@ -48,6 +74,7 @@ export default function JDFilesPage({ user, role, isDarkMode, toggleDarkMode }) 
     return () => { cancelled = true }
   }, [])
 
+  // เปิดไฟล์ในแท็บใหม่ผ่าน signed URL (URL มีอายุจำกัดจาก Supabase)
   async function handleOpen(path) {
     const url = await getJDSignedUrl(path)
     if (url) window.open(url, '_blank')
@@ -57,6 +84,7 @@ export default function JDFilesPage({ user, role, isDarkMode, toggleDarkMode }) 
     if (!file?.path) return
     setDeletingPath(file.path)
     try {
+      // ลบไฟล์จาก Supabase Storage
       await deleteJDFile(file.path)
 
       // ล้าง reference ของไฟล์ JD ใน request ต้นทาง (ถ้า folder เป็น Firestore doc ID)
@@ -73,6 +101,7 @@ export default function JDFilesPage({ user, role, isDarkMode, toggleDarkMode }) 
         }
       }
 
+      // อัปเดต local state ให้ลบไฟล์ออกจาก list โดยไม่ต้อง refetch
       setFiles((prev) => prev.filter((f) => f.path !== file.path))
     } catch (e) {
       console.error('[JDFilesPage] Delete error:', e)
@@ -83,6 +112,7 @@ export default function JDFilesPage({ user, role, isDarkMode, toggleDarkMode }) 
     }
   }
 
+  // แปลง bytes → KB / MB สำหรับแสดงขนาดไฟล์
   function formatSize(bytes) {
     if (!bytes) return '—'
     const mb = bytes / (1024 * 1024)
@@ -118,8 +148,9 @@ export default function JDFilesPage({ user, role, isDarkMode, toggleDarkMode }) 
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {files.map((file) => {
+              // หา request ที่ตรงกับ folder ของไฟล์นี้ (ใช้ requestMap ที่ build ไว้)
               const req = requestMap[file.folder]
-              // Clean up file name (remove timestamp_ prefix if exists)
+              // ตัด timestamp prefix ออกจากชื่อไฟล์ (format: {timestamp}_{originalName})
               const displayName = file.name.includes('_')
                 ? file.name.split('_').slice(1).join('_')
                 : file.name
@@ -135,6 +166,7 @@ export default function JDFilesPage({ user, role, isDarkMode, toggleDarkMode }) 
                       <FileText size={24} />
                     </div>
                     <div className="flex-1 min-w-0">
+                      {/* แสดง position + department จาก request ที่ตรงกัน หรือ fallback เป็น folder ID ย่อ */}
                       <p className="text-[11px] font-black text-emerald-600 dark:text-emerald-500 uppercase tracking-widest mb-1 truncate">
                         {req ? `${req.position} (${req.department})` : file.folder.slice(0, 8).toUpperCase()}
                       </p>
@@ -153,12 +185,13 @@ export default function JDFilesPage({ user, role, isDarkMode, toggleDarkMode }) 
                     </div>
                   </div>
 
+                  {/* ปุ่ม open และ delete แสดงเมื่อ hover — delete แสดงเฉพาะ admin */}
                   <div className="absolute top-4 right-4 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                     <ExternalLink size={16} className="text-gray-300" />
                     {role === 'admin' && (
                       <button
                         onClick={(e) => {
-                          e.stopPropagation()
+                          e.stopPropagation() // ป้องกัน click เปิดไฟล์เมื่อกดปุ่มลบ
                           setConfirmState({ isOpen: true, file })
                         }}
                         disabled={deletingPath === file.path}
@@ -175,6 +208,8 @@ export default function JDFilesPage({ user, role, isDarkMode, toggleDarkMode }) 
           </div>
         )}
       </div>
+
+      {/* Confirm dialog ก่อนลบไฟล์ */}
       <ConfirmModal
         isOpen={confirmState.isOpen}
         onClose={() => setConfirmState({ isOpen: false, file: null })}
