@@ -26,7 +26,7 @@
  */
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { collection, addDoc, updateDoc, doc, serverTimestamp, getDocs, query, where } from 'firebase/firestore'
+import { collection, addDoc, updateDoc, doc, serverTimestamp, getDocs, query, where, runTransaction, getDoc } from 'firebase/firestore'
 import { db } from '../../services/firebase'
 import { sendToWebhook } from '../../services/webhook'
 import { logAudit } from '../../services/auditLog'
@@ -435,20 +435,52 @@ export default function HCRequestForm({ user, role, maintenanceMode = false }) {
     setForm((prev) => ({ ...prev, [name]: value }))
   }, [])
 
+  // ─── generateHCID ─────────────────────────────────────────────────────────
+  // สร้าง HCID ในรูปแบบ REQ-YYYY-NNN โดยใช้ Firestore transaction เพื่อป้องกัน race condition
+  // อ่าน/อัพเดต counter ใน document 'meta/hcid_counter' อย่าง atomic
+  // ถ้าปีเปลี่ยน → reset seq เป็น 1 อัตโนมัติ
+  async function generateHCID() {
+    const counterRef = doc(db, 'meta', 'hcid_counter')
+    const currentYear = new Date().getFullYear()
+
+    const newSeq = await runTransaction(db, async (tx) => {
+      const snap = await tx.get(counterRef)
+      let seq = 1
+
+      if (snap.exists()) {
+        const data = snap.data()
+        // reset เมื่อขึ้นปีใหม่
+        seq = data.year === currentYear ? (data.seq || 0) + 1 : 1
+      }
+
+      tx.set(counterRef, { year: currentYear, seq })
+      return seq
+    })
+
+    // รูปแบบ REQ-2026-001, REQ-2026-412, ...
+    const padded = String(newSeq).padStart(3, '0')
+    return `REQ-${currentYear}-${padded}`
+  }
+
   // ─── handleSubmit ──────────────────────────────────────────────────────────
   // ขั้นตอนการ submit ฟอร์ม:
-  // 1. addDoc → สร้าง Firestore document ใน 'hc_requests' (ได้ docRef.id)
-  // 2. (ถ้ามีไฟล์ JD) uploadJDFile → อัพโหลดไป Supabase ด้วย folder = docRef.id
+  // 1. generateHCID → สร้าง HCID ในรูปแบบ REQ-YYYY-NNN (atomic counter)
+  // 2. addDoc → สร้าง Firestore document ใน 'hc_requests' (ได้ docRef.id)
+  // 3. (ถ้ามีไฟล์ JD) uploadJDFile → อัพโหลดไป Supabase ด้วย folder = docRef.id
   //    แล้ว updateDoc เพิ่ม jdFileUrl, jdFilePath, jdFileName ลงใน Firestore
-  // 3. ตรวจสอบว่าตำแหน่งเป็น custom position หรือไม่ → addDoc ใน 'custom_positions' ถ้าใช่
-  // 4. sendToWebhook → แจ้งเตือน Slack / LINE / GAS Sheet
-  // 5. logAudit → บันทึก audit trail (action='Submit', toStatus='Open')
+  // 4. ตรวจสอบว่าตำแหน่งเป็น custom position หรือไม่ → addDoc ใน 'custom_positions' ถ้าใช่
+  // 5. sendToWebhook → แจ้งเตือน Slack / LINE / GAS Sheet
+  // 6. logAudit → บันทึก audit trail (action='Submit', toStatus='Open')
   async function handleSubmit(e) {
     e.preventDefault()
     setLoading(true)
     setError('')
 
     try {
+      // ── Step 1: สร้าง HCID ในรูปแบบ REQ-YYYY-NNN ─────────────────────────────
+      // ต้องทำก่อน addDoc เพื่อให้ hcId พร้อมอยู่ใน payload ตั้งแต่ต้น
+      const hcId = await generateHCID()
+
       // สร้าง payload จาก form state + metadata ของ user
       const payload = {
         ...form,
@@ -456,14 +488,15 @@ export default function HCRequestForm({ user, role, maintenanceMode = false }) {
         requesterName: user.displayName,
         requesterEmail: user.email,
         status: 'Open',                       // สถานะเริ่มต้นเสมอ
+        hcId,                                 // HCID ที่ generate: REQ-YYYY-NNN
         createdAt: serverTimestamp(),          // ให้ Firestore ใส่ timestamp server
       }
 
-      // ── Step 1: สร้าง Firestore document ──────────────────────────────────
+      // ── Step 2: สร้าง Firestore document ──────────────────────────────────
       // ต้องสร้างก่อนเพื่อได้ docRef.id ใช้เป็น folder name ใน Supabase
       const docRef = await addDoc(collection(db, 'hc_requests'), payload)
 
-      // ── Step 2: อัพโหลดไฟล์ JD (ถ้ามี) ───────────────────────────────────
+      // ── Step 3: อัพโหลดไฟล์ JD (ถ้ามี) ───────────────────────────────────
       // uploadJDFile(file, docId) → อัพโหลดไป Supabase bucket ที่ path: jd/{docId}/{filename}
       // แล้ว updateDoc เพิ่ม jdFileUrl, jdFilePath, jdFileName กลับเข้า Firestore
       if (jdFile) {
@@ -478,7 +511,7 @@ export default function HCRequestForm({ user, role, maintenanceMode = false }) {
         setUploadProgress('')
       }
 
-      // ── Step 3: บันทึก Custom Position (ถ้าไม่มีในรายการ) ─────────────────
+      // ── Step 4: บันทึก Custom Position (ถ้าไม่มีในรายการ) ─────────────────
       // ตรวจว่าตำแหน่งนี้มีใน Sheets หรือ Firestore custom_positions แล้วหรือยัง
       const normalizedPosition = normalizeText(payload.position)
       const knownFromSheet = getPositionsByDepartment(positionsByDept, payload.department)
@@ -501,14 +534,14 @@ export default function HCRequestForm({ user, role, maintenanceMode = false }) {
         setCustomPositions((prev) => [...prev, customDoc])
       }
 
-      // ── Step 4: ส่ง Webhook notification ─────────────────────────────────
+      // ── Step 5: ส่ง Webhook notification ─────────────────────────────────
       // sendToWebhook ส่งไปยัง Google Apps Script ซึ่งจะ:
       //   - บันทึกลง Google Sheets
       //   - ส่ง LINE Notify / Slack notification ไปยัง TA team
       // maintenance: true → GAS จะ skip การส่งแจ้งเตือน
       await sendToWebhook({ ...payload, id: docRef.id, createdAt: new Date().toISOString(), maintenance: maintenanceMode })
 
-      // ── Step 5: บันทึก Audit Log ──────────────────────────────────────────
+      // ── Step 6: บันทึก Audit Log ──────────────────────────────────────────
       // logAudit บันทึกลง Firestore collection 'audit_logs' สำหรับ activity tracking
       logAudit({
         requestId:  docRef.id,

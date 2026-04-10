@@ -42,5 +42,12 @@ service cloud.firestore {
       allow read: if true;
       allow write: if isAdmin();
     }
+
+    // HCID Counter — ใช้สำหรับ generate REQ-YYYY-NNN sequence
+    // เขียนได้เฉพาะ freshket user (ป้องกัน counter ถูกแก้ไขจากภายนอก)
+    match /meta/{docId} {
+      allow read: if isFreshket();
+      allow write: if isFreshket();
+    }
   }
 }
