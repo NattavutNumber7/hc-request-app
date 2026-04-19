@@ -81,7 +81,8 @@
 import { useEffect, useState, useMemo, useCallback, Fragment } from 'react'
 import { collection, onSnapshot, orderBy, query, doc, updateDoc, getDocs, where, deleteDoc, serverTimestamp, arrayUnion, arrayRemove, limit, Timestamp } from 'firebase/firestore'
 import { db } from '../../services/firebase'
-import { sendStatusUpdate } from '../../services/webhook'
+import { sendStatusUpdate, sendDeleteToSheets } from '../../services/webhook'
+import { getJGLabel } from '../../data/jobGrades'
 import { logAudit } from '../../services/auditLog'
 import { Loader2, UserCheck, XCircle, ChevronUp, ChevronDown, ChevronsUpDown, SlidersHorizontal, X, FileText, Search, ChevronRight, Users, Calendar, AlignLeft, ClipboardList, Pencil, Trash2, Upload, File } from 'lucide-react'
 import { getJDSignedUrl, deleteJDFile, uploadCVFile, getCVSignedUrl, deleteCVFile } from '../../services/supabase'
@@ -249,7 +250,7 @@ export default function RequestTable({
   const [sortDir, setSortDir] = useState('desc')
   const [confirmState, setConfirmState] = useState({ isOpen: false, action: null, payload: null })
   // Onboarding modal: กรอกวันเริ่มงานก่อนเปลี่ยนสถานะ
-  const [offeringModal, setOfferingModal] = useState({ isOpen: false, id: null })
+  const [offeringModal, setOfferingModal] = useState({ isOpen: false, id: null, mode: 'onboarding' })
   const [offeringStartDate, setOfferingStartDate] = useState('')
   const [candidateEditId, setCandidateEditId] = useState(null)   // id ที่กำลัง edit
   const [candidateEditVal, setCandidateEditVal] = useState('')   // ค่าที่กำลังพิมพ์
@@ -349,7 +350,7 @@ export default function RequestTable({
     const req = requests.find((r) => r.id === id)
     try {
       await updateDoc(doc(db, 'hc_requests', id), { status: 'Cancelled', statusHistory: arrayUnion(buildHistoryEntry('Cancelled', user)) })
-      sendStatusUpdate(id, 'Cancelled')
+      sendStatusUpdate(id, 'Cancelled', null, null, null, null, req?.hcId)
       logAudit({ requestId: id, action: 'Cancel', by: user.email, byName: user.displayName, fromStatus: req?.status, toStatus: 'Cancelled', position: req?.position, department: req?.department })
     } catch (err) {
       console.error('[handleCancel]', err)
@@ -363,7 +364,7 @@ export default function RequestTable({
     const req = requests.find((r) => r.id === id)
     try {
       await updateDoc(doc(db, 'hc_requests', id), { status: 'Recruiting', assignedTo: user.email, assignedToName: user.displayName, assignedAt: serverTimestamp(), statusHistory: arrayUnion(buildHistoryEntry('Recruiting', user)) })
-      sendStatusUpdate(id, 'Recruiting', user.displayName, new Date().toISOString())
+      sendStatusUpdate(id, 'Recruiting', user.displayName, new Date().toISOString(), null, null, req?.hcId)
       logAudit({ requestId: id, action: 'Assign', by: user.email, byName: user.displayName, fromStatus: req?.status, toStatus: 'Recruiting', position: req?.position, department: req?.department })
     } catch (err) {
       console.error('[handleClaim]', err)
@@ -392,10 +393,23 @@ export default function RequestTable({
       if (newStatus === 'Rejected') updateData.rejectedAt = serverTimestamp()
       if (newStatus === 'Closed') updateData.closedAt = serverTimestamp()
       if (newStatus === 'Onboarding') { updateData.rejectReason = ''; updateData.rejectedAt = null }
+      if (newStatus === 'Offering' && !req.offeringDate) updateData.offeringDate = new Date().toISOString()
+      // กลับไปก่อน Offering → ล้าง offeringDate
+      const PRE_OFFERING = ['Open', 'Recruiting', 'Interviewing']
+      if (PRE_OFFERING.includes(newStatus) && req.offeringDate) updateData.offeringDate = ''
+      // กลับไป Interviewing / Rejected → ล้าง candidateName + startDate
+      const CLEAR_CANDIDATE = ['Open', 'Recruiting', 'Interviewing', 'Rejected']
+      if (CLEAR_CANDIDATE.includes(newStatus) && (req.candidateName || req.startDate)) {
+        updateData.candidateName = ''
+        updateData.startDate = ''
+      }
 
       await updateDoc(doc(db, 'hc_requests', id), updateData)
       const assignedAt = updateData.assignedAt ? new Date().toISOString() : req.assignedAt?.toDate?.().toISOString()
-      sendStatusUpdate(id, newStatus, updateData.assignedToName || req.assignedToName, assignedAt, extraData.startDate || null, extraData.candidateName || null)
+      const offeringDate = PRE_OFFERING.includes(newStatus) && req.offeringDate ? 'CLEAR'
+        : (updateData.offeringDate || req.offeringDate || null)
+      const clearInfo = CLEAR_CANDIDATE.includes(newStatus) && !!(req.candidateName || req.startDate)
+      sendStatusUpdate(id, newStatus, updateData.assignedToName || req.assignedToName, assignedAt, extraData.startDate || null, extraData.candidateName || null, req?.hcId, offeringDate, clearInfo)
       logAudit({
         requestId: id,
         action: newStatus === 'Rejected' ? 'Rejected' : 'StatusChange',
@@ -415,14 +429,23 @@ export default function RequestTable({
     }
   }
 
-  // Onboarding confirm: บันทึกวันเริ่มงาน + ชื่อ candidate + เปลี่ยนสถานะ
+  // Offering / Onboarding confirm
   async function handleOfferingConfirm() {
-    if (!offeringStartDate || !offeringModal.id) return
-    await handleStatusChange(offeringModal.id, 'Onboarding', {
-      startDate: offeringStartDate,
-      candidateName: offeringCandidateName.trim(),
-    })
-    setOfferingModal({ isOpen: false, id: null })
+    if (!offeringModal.id) return
+    if (offeringModal.mode === 'offering') {
+      // Offering: กรอกชื่อ candidate (optional) — offeringDate auto-set ใน handleStatusChange
+      await handleStatusChange(offeringModal.id, 'Offering', {
+        candidateName: offeringCandidateName.trim() || undefined,
+      })
+    } else {
+      // Onboarding: ต้องมี startDate
+      if (!offeringStartDate) return
+      await handleStatusChange(offeringModal.id, 'Onboarding', {
+        startDate: offeringStartDate,
+        candidateName: offeringCandidateName.trim() || undefined,
+      })
+    }
+    setOfferingModal({ isOpen: false, id: null, mode: 'onboarding' })
     setOfferingStartDate('')
     setOfferingCandidateName('')
   }
@@ -439,7 +462,7 @@ export default function RequestTable({
         startDate: '',
         statusHistory: arrayUnion(buildHistoryEntry('Rejected', user)),
       })
-      sendStatusUpdate(rejectModal.id, 'Rejected', req?.assignedToName)
+      sendStatusUpdate(rejectModal.id, 'Rejected', req?.assignedToName, null, null, null, req?.hcId)
       logAudit({
         requestId: rejectModal.id,
         action: 'Rejected',
@@ -499,7 +522,7 @@ export default function RequestTable({
     const req = requests.find((r) => r.id === id)
     try {
       await updateDoc(doc(db, 'hc_requests', id), { status: 'Recruiting', startDate: '', rejectedAt: null, statusHistory: arrayUnion(buildHistoryEntry('Recruiting', user)) })
-      sendStatusUpdate(id, 'Recruiting', req.assignedToName)
+      sendStatusUpdate(id, 'Recruiting', req.assignedToName, null, null, null, req?.hcId)
       logAudit({
         requestId: id,
         action: 'Reopen',
@@ -526,7 +549,7 @@ export default function RequestTable({
         assignedToName: newTAName,
         assignedAt: serverTimestamp(),
       })
-      sendStatusUpdate(id, req?.status, newTAName, now)
+      sendStatusUpdate(id, req?.status, newTAName, now, null, null, req?.hcId)
       logAudit({
         requestId: id,
         action: 'Assign',
@@ -558,6 +581,9 @@ export default function RequestTable({
 
       // 2. ลบ Document ใน Firestore
       await deleteDoc(doc(db, 'hc_requests', id))
+
+      // 3. แจ้ง GAS ให้ลบ row ใน Google Sheets (ถ้ามี hcId)
+      if (req?.hcId) sendDeleteToSheets(req.hcId)
 
       logAudit({
         requestId: id,
@@ -917,7 +943,7 @@ export default function RequestTable({
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-2">
                           <ChevronRight size={13} strokeWidth={3} className={`text-gray-300 dark:text-slate-700 transition-transform shrink-0 ${isExpanded ? 'rotate-90 text-emerald-500' : 'rotate-0 group-hover:text-gray-400'}`} />
-                          <span className="font-mono text-[10px] font-bold text-gray-400 dark:text-slate-600 tracking-tighter uppercase">{req.id.slice(0, 7)}</span>
+                          <span className="font-mono text-[10px] font-bold text-gray-400 dark:text-slate-600 tracking-tighter uppercase">{req.hcId || req.id.slice(0, 7)}</span>
                         </div>
                       </td>
                       <td className="px-4 py-3">
@@ -930,7 +956,7 @@ export default function RequestTable({
                       </td>
                       <td className="px-4 py-3">
                         <p className="font-bold text-gray-800 dark:text-gray-200 leading-tight">{req.position}</p>
-                        {req.jg && <p className="text-[10px] font-bold text-gray-400 dark:text-slate-500 mt-0.5 uppercase tracking-wide">{req.jg}</p>}
+                        {req.jg && <p className="text-[10px] font-bold text-gray-400 dark:text-slate-500 mt-0.5 uppercase tracking-wide">{getJGLabel(req.jg)}</p>}
                       </td>
                       <td className="px-4 py-3 text-gray-600 dark:text-slate-400 font-medium">{req.department}</td>
                       <td className="px-4 py-3 text-gray-500 dark:text-slate-500 text-[11px] font-medium">{req.requesterName}</td>
@@ -972,8 +998,8 @@ export default function RequestTable({
                                 e.stopPropagation()
                                 const val = e.target.value
                                 if (val === 'Closed') { openConfirm('close', { id: req.id }); return }
-                                // Offering → เปิด modal กรอกวันเริ่มงาน
-                                if (val === 'Onboarding') { setOfferingModal({ isOpen: true, id: req.id }); return }
+                                if (val === 'Offering')   { setOfferingModal({ isOpen: true, id: req.id, mode: 'offering' }); setOfferingCandidateName(req.candidateName || ''); return }
+                                if (val === 'Onboarding') { setOfferingModal({ isOpen: true, id: req.id, mode: 'onboarding' }); setOfferingCandidateName(req.candidateName || ''); return }
                                 handleStatusChange(req.id, val)
                               }}
                               className="text-[10px] font-bold border border-emerald-500/30 rounded-lg px-2 py-1 bg-white dark:bg-slate-900 text-[#008065] dark:text-emerald-400 focus:outline-none cursor-pointer uppercase tracking-tight"
@@ -1086,7 +1112,7 @@ export default function RequestTable({
                                         onKeyDown={async e => {
                                           if (e.key === 'Enter') {
                                             await updateDoc(doc(db, 'hc_requests', req.id), { candidateName: candidateEditVal.trim() })
-                                            sendStatusUpdate(req.id, req.status, req.assignedToName, null, req.startDate, candidateEditVal.trim())
+                                            sendStatusUpdate(req.id, req.status, req.assignedToName, null, req.startDate, candidateEditVal.trim(), req.hcId)
                                             setCandidateEditId(null)
                                           } else if (e.key === 'Escape') {
                                             setCandidateEditId(null)
@@ -1098,7 +1124,7 @@ export default function RequestTable({
                                       <button
                                         onClick={async () => {
                                           await updateDoc(doc(db, 'hc_requests', req.id), { candidateName: candidateEditVal.trim() })
-                                          sendStatusUpdate(req.id, req.status, req.assignedToName, null, req.startDate, candidateEditVal.trim())
+                                          sendStatusUpdate(req.id, req.status, req.assignedToName, null, req.startDate, candidateEditVal.trim(), req.hcId)
                                           setCandidateEditId(null)
                                         }}
                                         className="text-[10px] font-black px-2 py-1 rounded-lg bg-indigo-500 text-white hover:bg-indigo-600 transition-colors shrink-0"
@@ -1462,10 +1488,16 @@ export default function RequestTable({
       {offeringModal.isOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
           <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-gray-200 dark:border-slate-700 w-full max-w-sm mx-4 p-6">
-            <h3 className="text-lg font-black text-gray-800 dark:text-gray-100 mb-1">Waiting Onboarding</h3>
-            <p className="text-sm text-gray-500 dark:text-slate-400 mb-5">กรุณากรอกข้อมูลผู้สมัครที่รับ offer</p>
+            <h3 className="text-lg font-black text-gray-800 dark:text-gray-100 mb-1">
+              {offeringModal.mode === 'offering' ? '📋 Offering' : '🟦 Waiting Onboarding'}
+            </h3>
+            <p className="text-sm text-gray-500 dark:text-slate-400 mb-5">
+              {offeringModal.mode === 'offering' ? 'กรอกชื่อผู้สมัครที่ได้รับ offer' : 'กรุณากรอกข้อมูลผู้สมัครที่รับ offer'}
+            </p>
 
-            <label className="block text-[10px] font-black text-gray-500 dark:text-slate-500 uppercase tracking-widest mb-2">ชื่อ Candidate *</label>
+            <label className="block text-[10px] font-black text-gray-500 dark:text-slate-500 uppercase tracking-widest mb-2">
+              ชื่อ Candidate {offeringModal.mode === 'onboarding' ? '*' : '(optional)'}
+            </label>
             <input
               id="offering-candidate" name="offering-candidate"
               type="text"
@@ -1476,27 +1508,32 @@ export default function RequestTable({
               autoFocus
             />
 
-            <label className="block text-[10px] font-black text-gray-500 dark:text-slate-500 uppercase tracking-widest mb-2">วันเริ่มงาน *</label>
-            <input
-              id="offering-start-date" name="offering-start-date"
-              type="date"
-              value={offeringStartDate}
-              onChange={(e) => setOfferingStartDate(e.target.value)}
-              className="w-full px-4 py-2.5 border border-gray-200 dark:border-slate-700 rounded-xl bg-white dark:bg-slate-800 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 text-sm font-medium"
-            />
+            {offeringModal.mode === 'onboarding' && (
+              <>
+                <label className="block text-[10px] font-black text-gray-500 dark:text-slate-500 uppercase tracking-widest mb-2">วันเริ่มงาน *</label>
+                <input
+                  id="offering-start-date" name="offering-start-date"
+                  type="date"
+                  value={offeringStartDate}
+                  onChange={(e) => setOfferingStartDate(e.target.value)}
+                  className="w-full px-4 py-2.5 border border-gray-200 dark:border-slate-700 rounded-xl bg-white dark:bg-slate-800 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 text-sm font-medium"
+                />
+              </>
+            )}
+
             <div className="flex gap-3 mt-6">
               <button
-                onClick={() => { setOfferingModal({ isOpen: false, id: null }); setOfferingStartDate(''); setOfferingCandidateName('') }}
+                onClick={() => { setOfferingModal({ isOpen: false, id: null, mode: 'onboarding' }); setOfferingStartDate(''); setOfferingCandidateName('') }}
                 className="flex-1 px-4 py-2.5 text-sm font-bold rounded-xl border border-gray-200 dark:border-slate-700 text-gray-600 dark:text-slate-400 hover:bg-gray-50 dark:hover:bg-slate-800 transition-colors"
               >
                 ยกเลิก
               </button>
               <button
                 onClick={handleOfferingConfirm}
-                disabled={!offeringStartDate || !offeringCandidateName.trim()}
-                className="flex-1 px-4 py-2.5 text-sm font-bold rounded-xl bg-teal-600 text-white hover:bg-teal-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shadow-md shadow-teal-500/20"
+                disabled={offeringModal.mode === 'onboarding' && (!offeringStartDate || !offeringCandidateName.trim())}
+                className={`flex-1 px-4 py-2.5 text-sm font-bold rounded-xl text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors shadow-md ${offeringModal.mode === 'offering' ? 'bg-indigo-600 hover:bg-indigo-700 shadow-indigo-500/20' : 'bg-teal-600 hover:bg-teal-700 shadow-teal-500/20'}`}
               >
-                ยืนยัน Onboarding
+                {offeringModal.mode === 'offering' ? 'ยืนยัน Offering' : 'ยืนยัน Onboarding'}
               </button>
             </div>
           </div>

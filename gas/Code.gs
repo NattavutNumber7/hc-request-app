@@ -1,8 +1,31 @@
 // =====================================
 // CONFIG
 // =====================================
-// Firebase project ID — ใช้สำหรับ Firestore REST API
-var FIREBASE_PROJECT_ID = 'hc-request-app'
+// Firebase project ID — อ่านจาก Script Properties (key: FIREBASE_PROJECT_ID)
+
+// ── JG Label Map — แปลง JG code → ชื่อเต็ม สำหรับ Sheets column Rank ──────
+var JG_LABELS = {
+  'JG14': 'JG14 — Chief Executive Officer',
+  'JG13': 'JG13 — C-Level',
+  'JG12': 'JG12 — Vice President',
+  'JG11': 'JG11 — Head of Department',
+  'JG10': 'JG10 — Senior Manager / Associate Director',
+  'JG9':  'JG9 — Manager / Lead',
+  'JG8':  'JG8 — Assistant Manager / Team Lead',
+  'JG7':  'JG7 — Senior Supervisor / Senior Specialist',
+  'JG6':  'JG6 — Supervisor / Specialist',
+  'JG5':  'JG5 — Senior Officer / Executive',
+  'JG4':  'JG4 — Officer',
+  'JG3':  'JG3 — Staff / Assistant',
+  'JG2':  'JG2 — Master',
+  'JG1':  'JG1 — Staff (Monthly)',
+  'JG0':  'JG0 — Contract Staff',
+  'Internship': 'Internship',
+}
+function getJGLabel_(jg) { return jg ? (JG_LABELS[jg] || jg) : '' }
+
+// ชื่อ sheet หลักที่ใช้เก็บข้อมูลทั้งหมด
+var JOB_OPENINGS_SHEET = 'Job Openings 2025'
 
 // Columns ใน sheet "Job Openings YYYY" (1-based index)
 // ถ้า header เปลี่ยน ให้แก้ค่าตรงนี้
@@ -177,21 +200,52 @@ function updateFirestoreByHcId_(hcId, data) {
 // =====================================
 // อ่าน Slack webhook URL จาก Script Properties (GAS Editor → Project Settings → Script Properties)
 // key: SLACK_NEW_REQUEST, SLACK_UPDATES
-var _props            = PropertiesService.getScriptProperties()
-var SLACK_NEW_REQUEST = _props.getProperty('SLACK_NEW_REQUEST') || ''
-var SLACK_UPDATES     = _props.getProperty('SLACK_UPDATES')     || ''
+var _props              = PropertiesService.getScriptProperties()
+var FIREBASE_PROJECT_ID = _props.getProperty('FIREBASE_PROJECT_ID') || 'hcrequest'
+var SLACK_NEW_REQUEST   = _props.getProperty('SLACK_NEW_REQUEST')   || ''
+var SLACK_UPDATES       = _props.getProperty('SLACK_UPDATES')       || ''
+var SLACK_SUBTEAM       = _props.getProperty('SLACK_SUBTEAM')       || ''
+var APP_URL             = _props.getProperty('APP_URL')             || 'https://hcrequest.web.app'
+// HR Spreadsheet (MainData + Manager_Access) — ต้องตั้งค่าใน Script Properties
+// key: HR_SPREADSHEET_ID  (ไม่มี fallback เพื่อป้องกัน spreadsheet ID หลุดในโค้ด)
+var HR_SPREADSHEET_ID   = _props.getProperty('HR_SPREADSHEET_ID')   || ''
+// Secret token สำหรับป้องกัน GAS endpoint — ต้องตั้งค่าใน Script Properties
+// key: DEPLOY_SECRET  (ใส่ random string เช่น uuid หรือ passphrase)
+// Web app ส่ง ?secret=XXX มาทุก request ที่ mutate ข้อมูล
+var DEPLOY_SECRET     = _props.getProperty('DEPLOY_SECRET')     || ''
+
+/**
+ * ตรวจ secret token ที่ส่งมาใน request parameter
+ * ถ้า DEPLOY_SECRET ไม่ได้ตั้งค่าไว้ใน Script Properties → ผ่านทุก request (backward compat)
+ * ถ้าตั้งค่าแล้ว → ต้อง match เท่านั้น
+ */
+function isValidSecret_(e) {
+  if (!DEPLOY_SECRET) return true  // ยังไม่ได้ตั้งค่า → ผ่าน (เพื่อ backward compat)
+  return (e.parameter.secret || '') === DEPLOY_SECRET
+}
+
+/**
+ * เปิด HR Spreadsheet (ไฟล์แยก — มี MainData + Manager_Access)
+ * อ่าน ID จาก Script Properties (GAS Editor → Project Settings → Script Properties)
+ * key: HR_SPREADSHEET_ID
+ */
+function getHrSpreadsheet_() {
+  if (!HR_SPREADSHEET_ID) throw new Error('HR_SPREADSHEET_ID not set in Script Properties')
+  return SpreadsheetApp.openById(HR_SPREADSHEET_ID)
+}
 
 function slackNewRequest(data) {
   var emoji = data.requestType === 'New HC' ? '🆕' : '🔁'
   var type  = data.requestType === 'New HC'
     ? 'New HC × ' + data.headcount
     : 'Replacement (ทดแทน ' + (data.replacementFor || '-') + ')'
-  var text = emoji + ' *HC Request ใหม่* <!subteam^S0313EL64GG|@taro>\n' +
+  var mention = SLACK_SUBTEAM ? ' ' + SLACK_SUBTEAM : ''
+  var text = emoji + ' *HC Request ใหม่*' + mention + '\n' +
     '*ตำแหน่ง:* ' + data.position + '  |  *JG:* ' + data.jg + '\n' +
     '*แผนก:* ' + data.department + '  |  *Location:* ' + data.orgTrack + '\n' +
     '*ประเภท:* ' + type + '\n' +
     '*ผู้ยื่น:* ' + data.requesterName + '\n' +
-    '🔗 https://hcrequest.web.app/all-requests'
+    '🔗 ' + APP_URL + '/all-requests'
   sendSlack_(SLACK_NEW_REQUEST, text)
 }
 
@@ -223,95 +277,250 @@ function sendSlack_(webhookUrl, text) {
 // DO GET
 // =====================================
 function doGet(e) {
-  const ss = SpreadsheetApp.openById('17dUCqyAMSwPl4Se0z7AczreiI9GWrTGDihs5Wf5u9sc')
+  const ss = SpreadsheetApp.getActiveSpreadsheet()
+
+  // ── DEBUG ──────────────────────────────────────────────────────────────────
+  if (e.parameter.action === 'debug') {
+    var info = { ssId: null, ssName: null, sheets: [], jobSheetFound: false, jobSheetRows: 0 }
+    if (ss) {
+      info.ssId   = ss.getId()
+      info.ssName = ss.getName()
+      info.sheets = ss.getSheets().map(function(s) { return s.getName() })
+      var js = ss.getSheetByName(JOB_OPENINGS_SHEET)
+      if (js) { info.jobSheetFound = true; info.jobSheetRows = js.getLastRow() }
+    } else {
+      info.error = 'getActiveSpreadsheet() returned null'
+    }
+    return responseJson_(info)
+  }
+
+  // ── DEBUG HR: เช็คการเข้าถึง HR Spreadsheet ──────────────────────────────
+  // เรียกด้วย ?action=debugHR
+  if (e.parameter.action === 'debugHR') {
+    try {
+      var hrSsTest = getHrSpreadsheet_()
+      var hrSheets = hrSsTest.getSheets().map(function(s) { return s.getName() })
+      var mdSheet  = hrSsTest.getSheetByName('MainData')
+      var mgSheetT = hrSsTest.getSheetByName('Manager_Access')
+      return responseJson_({
+        hrSsName: hrSsTest.getName(),
+        sheets: hrSheets,
+        mainDataFound: !!mdSheet,
+        mainDataRows: mdSheet ? mdSheet.getLastRow() : 0,
+        mainDataCols: mdSheet ? mdSheet.getLastColumn() : 0,
+        managerAccessFound: !!mgSheetT,
+        sampleRow: mdSheet && mdSheet.getLastRow() > 1 ? mdSheet.getRange(2, 1, 1, mdSheet.getLastColumn()).getValues()[0] : []
+      })
+    } catch(err) {
+      return responseJson_({ error: err.message })
+    }
+  }
+
+  // ── TEST CLEAR: ทดสอบล้าง candidate + startDate โดยตรง ────────────────────
+  // เรียกด้วย ?action=testClear&hcId=REQ-2026-411&secret=XXX
+  if (e.parameter.action === 'testClear') {
+    if (!isValidSecret_(e)) return responseJson_({ error: 'Unauthorized' })
+    var testHcId = e.parameter.hcId
+    if (!testHcId) return responseJson_({ error: 'missing hcId param' })
+    var jobSheet = ss.getSheetByName(JOB_OPENINGS_SHEET)
+    if (!jobSheet) return responseJson_({ error: 'sheet not found: ' + JOB_OPENINGS_SHEET })
+    var lastRow = jobSheet.getLastRow()
+    var hcidVals = jobSheet.getRange(2, COL_HCID, lastRow - 1, 1).getValues()
+    for (var i = 0; i < hcidVals.length; i++) {
+      if (hcidVals[i][0].toString().trim() === testHcId.toString().trim()) {
+        var rowNum = i + 2
+        var before = {
+          candidate: jobSheet.getRange(rowNum, COL_CANDIDATE).getValue(),
+          startDate: jobSheet.getRange(rowNum, COL_START_DATE).getValue(),
+        }
+        jobSheet.getRange(rowNum, COL_CANDIDATE).setValue('')
+        jobSheet.getRange(rowNum, COL_START_DATE).setValue('')
+        return responseJson_({ success: true, rowNum: rowNum, before: before, cleared: true })
+      }
+    }
+    return responseJson_({ success: false, error: 'hcId not found: ' + testHcId })
+  }
+
+  // ── DELETE ROW: ลบ row ออกจาก JOB_OPENINGS_SHEET โดยใช้ HCID ───────────────
+  // เรียกด้วย ?action=deleteRow&hcId=REQ-2026-NNN&secret=XXX
+  if (e.parameter.action === 'deleteRow') {
+    if (!isValidSecret_(e)) return responseJson_({ error: 'Unauthorized' })
+    var delHcId = e.parameter.hcId
+    if (!delHcId) return responseJson_({ error: 'missing hcId param' })
+    var delSheet = ss.getSheetByName(JOB_OPENINGS_SHEET)
+    if (!delSheet) return responseJson_({ error: 'sheet not found: ' + JOB_OPENINGS_SHEET })
+    var delLastRow = delSheet.getLastRow()
+    if (delLastRow < 2) return responseJson_({ success: false, error: 'sheet is empty' })
+    var delHcids = delSheet.getRange(2, COL_HCID, delLastRow - 1, 1).getValues()
+    for (var di = 0; di < delHcids.length; di++) {
+      if (delHcids[di][0].toString().trim() === delHcId.toString().trim()) {
+        delSheet.deleteRow(di + 2)
+        return responseJson_({ success: true, deleted: delHcId, rowNum: di + 2 })
+      }
+    }
+    return responseJson_({ success: false, error: 'hcId not found: ' + delHcId })
+  }
 
   if (e.parameter.action === 'maintenance') {
+    if (!isValidSecret_(e)) return responseJson_({ error: 'Unauthorized' })
     var isDown = e.parameter.active === 'true'
     var msg = isDown
-      ? '🔴 *ระบบ HC Request ปิดปรับปรุงชั่วคราว* <!subteam^S0313EL64GG|@taro>\nไม่สามารถเข้าใช้งานได้ขณะนี้ กรุณารอสักครู่'
-      : '🟢 *ระบบ HC Request เปิดใช้งานแล้ว* <!subteam^S0313EL64GG|@taro>\nสามารถเข้าใช้งานได้ที่ https://hcrequest.web.app'
+      ? '🔴 *ระบบ HC Request ปิดปรับปรุงชั่วคราว*' + (SLACK_SUBTEAM ? ' ' + SLACK_SUBTEAM : '') + '\nไม่สามารถเข้าใช้งานได้ขณะนี้ กรุณารอสักครู่'
+      : '🟢 *ระบบ HC Request เปิดใช้งานแล้ว*' + (SLACK_SUBTEAM ? ' ' + SLACK_SUBTEAM : '') + '\nสามารถเข้าใช้งานได้ที่ ' + APP_URL
     sendSlack_(SLACK_NEW_REQUEST, msg)
     sendSlack_(SLACK_UPDATES, msg)
     return responseJson_({ success: true })
   }
 
   if (e.parameter.action === 'updateStatus') {
+    if (!isValidSecret_(e)) return responseJson_({ error: 'Unauthorized' })
     try {
       const docId          = e.parameter.id
       const newStatus      = e.parameter.status
       const assignedToName = e.parameter.assignedToName || null
       const startDate      = e.parameter.startDate      || null
       const candidateName  = e.parameter.candidateName  || null
+      const hcId           = e.parameter.hcId           || null   // HCID เช่น REQ-2026-411
+      const offeringDate   = e.parameter.offeringDate   || null   // วัน Offer ISO string
+      const clearInfo      = e.parameter.clearInfo === '1'        // ล้าง candidateName + startDate
 
       const VALID = ['Open','Recruiting','Interviewing','Offering','Onboarding','Rejected','Closed','Cancelled']
       if (!docId || !newStatus)       return responseJson_({ success: false, error: 'Missing params' })
       if (!VALID.includes(newStatus)) return responseJson_({ success: false, error: 'Invalid status: ' + newStatus })
 
-      const sheet = ss.getSheetByName('HC_Request')
-      if (!sheet) return responseJson_({ success: false, error: 'Sheet HC_Request not found' })
+      // ── แปลง internal status → Sheets status ──────────────────────────────
+      const STATUS_MAP = {
+        Open: 'Open', Recruiting: 'Active Sourcing', Interviewing: 'Interviewing',
+        Offering: 'Pending Offer', Onboarding: 'Pending Onboard',
+        Closed: 'Onboard', Rejected: 'Turndown', Cancelled: 'Job Cancelled',
+      }
+      const sheetsStatus = STATUS_MAP[newStatus] || newStatus
 
-      const headers          = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0]
-      const idColIdx         = headers.indexOf('Request ID')
-      const statusColIdx     = headers.indexOf('Status')
-      const taColIdx         = headers.indexOf('คนรับเคส')
-      const startDateColIdx  = headers.indexOf('วันที่เริ่มงาน')
-      const candidateColIdx  = headers.indexOf('ชื่อ Candidate')
-      const posColIdx        = headers.indexOf('ตำแหน่ง')
-      const deptColIdx       = headers.indexOf('แผนก')
+      var position = '', dept = '', oldStatus = ''
 
-      if (idColIdx === -1) return responseJson_({ success: false, error: 'ไม่พบ column Request ID ใน header' })
+      // ── อัพเดต JOB_OPENINGS_SHEET โดยใช้ HCID (ถ้ามี) ──────────────────────
+      if (hcId) {
+        const jobSheet = ss.getSheetByName(JOB_OPENINGS_SHEET)
+        if (jobSheet && jobSheet.getLastRow() > 1) {
+          const hcidValues = jobSheet.getRange(2, COL_HCID, jobSheet.getLastRow() - 1, 1).getValues()
+          for (let i = 0; i < hcidValues.length; i++) {
+            if (hcidValues[i][0].toString().trim() === hcId.toString().trim()) {
+              const rowNum = i + 2
+              oldStatus = jobSheet.getRange(rowNum, COL_STATUS).getValue()
+              position  = jobSheet.getRange(rowNum, COL_POSITION).getValue()
+              dept      = jobSheet.getRange(rowNum, COL_DEPT).getValue()
 
-      for (let i = 2; i <= sheet.getLastRow(); i++) {
-        if (sheet.getRange(i, idColIdx + 1).getValue() === docId) {
-          var oldStatus = statusColIdx !== -1 ? sheet.getRange(i, statusColIdx + 1).getValue() : ''
-          var position  = posColIdx    !== -1 ? sheet.getRange(i, posColIdx    + 1).getValue() : ''
-          var dept      = deptColIdx   !== -1 ? sheet.getRange(i, deptColIdx   + 1).getValue() : ''
-
-          if (statusColIdx    !== -1) sheet.getRange(i, statusColIdx    + 1).setValue(newStatus)
-          if (assignedToName  && taColIdx        !== -1) sheet.getRange(i, taColIdx        + 1).setValue(assignedToName)
-          if (startDate       && startDateColIdx !== -1) sheet.getRange(i, startDateColIdx + 1).setValue(startDate)
-          if (candidateName   && candidateColIdx !== -1) sheet.getRange(i, candidateColIdx + 1).setValue(candidateName)
-
-          slackStatusUpdate(position, dept, oldStatus, newStatus, assignedToName, candidateName)
-          return responseJson_({ success: true })
+              jobSheet.getRange(rowNum, COL_STATUS).setValue(sheetsStatus)
+              if (assignedToName) jobSheet.getRange(rowNum, COL_PIC).setValue(assignedToName)
+              if (clearInfo) {
+                jobSheet.getRange(rowNum, COL_CANDIDATE).setValue('')   // ล้างชื่อ Candidate
+                jobSheet.getRange(rowNum, COL_START_DATE).setValue('')  // ล้างวันเริ่มงาน
+              } else {
+                if (candidateName) jobSheet.getRange(rowNum, COL_CANDIDATE).setValue(candidateName)
+                if (startDate)     jobSheet.getRange(rowNum, COL_START_DATE).setValue(startDate)
+              }
+              if (offeringDate === 'CLEAR') {
+                // กลับไปสถานะก่อน Offering → ล้างค่า
+                jobSheet.getRange(rowNum, COL_OFFER_DATE).setValue('')
+                jobSheet.getRange(rowNum, 13).setValue('')  // Offer Month
+                jobSheet.getRange(rowNum, 14).setValue('')  // Offer Year
+                jobSheet.getRange(rowNum, 15).setValue('')  // SLA Offer (days)
+              } else if (offeringDate) {
+                var od = new Date(offeringDate)
+                var oMonths = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+                jobSheet.getRange(rowNum, COL_OFFER_DATE).setValue(od.getDate() + '-' + oMonths[od.getMonth()] + '-' + od.getFullYear())
+                jobSheet.getRange(rowNum, 13).setValue(String(od.getMonth() + 1).padStart(2, '0'))  // Offer Month
+                jobSheet.getRange(rowNum, 14).setValue(String(od.getFullYear()))                    // Offer Year
+                // SLA Offer = จำนวนวันตั้งแต่ Open Date ถึง Offering Date (col O = 15)
+                var openDateVal = jobSheet.getRange(rowNum, COL_OPEN_JOBS).getValue()
+                if (openDateVal) {
+                  var openDateObj = openDateVal instanceof Date ? openDateVal : new Date(openDateVal)
+                  var slaDays = Math.round((od - openDateObj) / (1000 * 60 * 60 * 24))
+                  if (slaDays >= 0) jobSheet.getRange(rowNum, 15).setValue(slaDays)
+                }
+              }
+              break
+            }
+          }
         }
       }
-      return responseJson_({ success: false, error: 'Row not found: ' + docId })
+
+      // ── อัพเดต HC_Request sheet (legacy) ────────────────────────────────────
+      const sheet = ss.getSheetByName('HC_Request')
+      if (sheet) {
+        const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0]
+        const idColIdx        = headers.indexOf('Request ID')
+        const statusColIdx    = headers.indexOf('Status')
+        const taColIdx        = headers.indexOf('คนรับเคส')
+        const startDateColIdx = headers.indexOf('วันที่เริ่มงาน')
+        const candidateColIdx = headers.indexOf('ชื่อ Candidate')
+        const posColIdx       = headers.indexOf('ตำแหน่ง')
+        const deptColIdx      = headers.indexOf('แผนก')
+
+        if (idColIdx !== -1) {
+          for (let i = 2; i <= sheet.getLastRow(); i++) {
+            if (sheet.getRange(i, idColIdx + 1).getValue() === docId) {
+              if (!position) position = posColIdx  !== -1 ? sheet.getRange(i, posColIdx  + 1).getValue() : ''
+              if (!dept)     dept     = deptColIdx !== -1 ? sheet.getRange(i, deptColIdx + 1).getValue() : ''
+              if (!oldStatus) oldStatus = statusColIdx !== -1 ? sheet.getRange(i, statusColIdx + 1).getValue() : ''
+
+              if (statusColIdx    !== -1) sheet.getRange(i, statusColIdx    + 1).setValue(newStatus)
+              if (assignedToName && taColIdx        !== -1) sheet.getRange(i, taColIdx        + 1).setValue(assignedToName)
+              if (startDate      && startDateColIdx !== -1) sheet.getRange(i, startDateColIdx + 1).setValue(startDate)
+              if (candidateName  && candidateColIdx !== -1) sheet.getRange(i, candidateColIdx + 1).setValue(candidateName)
+              break
+            }
+          }
+        }
+      }
+
+      slackStatusUpdate(position, dept, oldStatus, newStatus, assignedToName, candidateName)
+      return responseJson_({ success: true })
     } catch (err) {
       return responseJson_({ success: false, error: err.message })
     }
   }
 
-  const mgSheet = ss.getSheetByName('Manager_Access')
-  const mgData  = mgSheet.getDataRange().getValues()
-  const managers = {}
-  for (let i = 1; i < mgData.length; i++) {
-    if (mgData[i][0]) managers[mgData[i][0].trim()] = mgData[i][1].trim()
-  }
+  // ดึงข้อมูลพนักงานและ Manager จาก Spreadsheet แยก (HR database)
+  // ครอบด้วย try/catch เพื่อป้องกัน crash → GAS จะคืน JSON error (มี CORS header) แทน HTML
+  try {
+    const hrSs      = getHrSpreadsheet_()
 
-  const mainSheet = ss.getSheetByName('MainData')
-  const mainData  = mainSheet.getDataRange().getValues()
-  const employees = {}, positionsByDept = {}
-  for (let i = 1; i < mainData.length; i++) {
-    const name = mainData[i][1]?.toString().trim()
-    const dept = mainData[i][3]?.toString().trim()
-    const pos  = mainData[i][4]?.toString().trim()
-    if (name && dept) {
-      if (!employees[dept]) employees[dept] = []
-      employees[dept].push(name)
+    const mgSheet   = hrSs.getSheetByName('Manager_Access')
+    if (!mgSheet) return responseJson_({ error: 'Sheet Manager_Access not found in HR spreadsheet' })
+    const mgData    = mgSheet.getDataRange().getValues()
+    const managers  = {}
+    for (let i = 1; i < mgData.length; i++) {
+      if (mgData[i][0]) managers[mgData[i][0].trim()] = mgData[i][1] ? mgData[i][1].trim() : ''
     }
-    if (pos && dept) {
-      if (!positionsByDept[dept]) positionsByDept[dept] = new Set()
-      positionsByDept[dept].add(pos)
+
+    const mainSheet = hrSs.getSheetByName('MainData')
+    if (!mainSheet) return responseJson_({ error: 'Sheet MainData not found in HR spreadsheet' })
+    const mainData  = mainSheet.getDataRange().getValues()
+    const employees = {}, positionsByDept = {}
+    for (let i = 1; i < mainData.length; i++) {
+      const name = mainData[i][1]?.toString().trim()
+      const dept = mainData[i][3]?.toString().trim()
+      const pos  = mainData[i][4]?.toString().trim()
+      if (name && dept) {
+        if (!employees[dept]) employees[dept] = []
+        employees[dept].push(name)
+      }
+      if (pos && dept) {
+        if (!positionsByDept[dept]) positionsByDept[dept] = new Set()
+        positionsByDept[dept].add(pos)
+      }
     }
+    const positions = {}
+    for (const [dept, set] of Object.entries(positionsByDept)) {
+      positions[dept] = [...set].sort()
+    }
+    return ContentService
+      .createTextOutput(JSON.stringify({ managers, positions, employees }))
+      .setMimeType(ContentService.MimeType.JSON)
+  } catch (err) {
+    return responseJson_({ error: 'HR data load failed: ' + err.message })
   }
-  const positions = {}
-  for (const [dept, set] of Object.entries(positionsByDept)) {
-    positions[dept] = [...set].sort()
-  }
-  return ContentService
-    .createTextOutput(JSON.stringify({ managers, positions, employees }))
-    .setMimeType(ContentService.MimeType.JSON)
 }
 
 // =====================================
@@ -320,7 +529,7 @@ function doGet(e) {
 function doPost(e) {
   try {
     var data = JSON.parse(e.postData.contents)
-    var ss   = SpreadsheetApp.openById('17dUCqyAMSwPl4Se0z7AczreiI9GWrTGDihs5Wf5u9sc')
+    var ss   = SpreadsheetApp.getActiveSpreadsheet()
 
     // ─── NEW: syncBatch ─────────────────────────────────────
     // รับ array ของ rows และ upsert ลงใน sheet "Job Openings YYYY"
@@ -328,9 +537,37 @@ function doPost(e) {
       return syncBatchHandler_(ss, data.rows || [])
     }
 
-    // ─── Existing: new HC request ────────────────────────────
-    var sheet = ss.getSheetByName('HC_Request') || ss.insertSheet('HC_Request')
+    // ─── New HC / Replacement request ────────────────────────
+    // 1) upsert เข้า "Job Openings YYYY" ทันที (sheet หลักที่ TA ใช้งาน)
+    // 2) append เข้า "HC_Request" (sheet สำรอง/legacy)
+    // 3) ส่ง Slack notification
 
+    // แปลง createdAt เป็น Date สำหรับ openDate
+    var openDateObj = data.createdAt ? new Date(data.createdAt) : new Date()
+    var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+    var openDateFmt = openDateObj.getDate() + '-' + months[openDateObj.getMonth()] + '-' + openDateObj.getFullYear()
+
+    // Map ข้อมูลให้ตรงกับ format ของ syncBatchHandler_
+    var jobOpeningRow = {
+      hcId:           data.hcId || data.id || '',   // REQ-YYYY-NNN
+      openDate:       openDateFmt,
+      employmentType: data.employmentType || 'Monthly',
+      requestType:    data.requestType === 'New HC' ? 'New HC' : 'Replace',
+      position:       data.position || '',
+      jg:             data.jg || '',
+      department:     data.department || '',
+      businessUnit:   data.businessUnit || data.division || '',
+      assignedToName: '',                           // ยังไม่มี TA ตอน Open
+      status:         'Open',
+      candidateName:  '',
+      offeringDate:   '',
+      startDate:      '',
+      contractEndDate: '',
+    }
+    syncBatchHandler_(ss, [jobOpeningRow])
+
+    // HC_Request sheet (legacy — เก็บไว้เพื่อ backward compat)
+    var sheet = ss.getSheetByName('HC_Request') || ss.insertSheet('HC_Request')
     if (sheet.getLastRow() === 0) {
       sheet.appendRow([
         'Status','ประเภทคำขอ','Job Grade','ตำแหน่ง','แผนก','Google Drive Link',
@@ -341,7 +578,6 @@ function doPost(e) {
       sheet.getRange(1, 1, 1, 18).setFontWeight('bold').setBackground('#4a90d9').setFontColor('#ffffff')
       sheet.setFrozenRows(1)
     }
-
     var isNew = data.requestType === 'New HC'
     sheet.appendRow([
       data.status, data.requestType, data.jg, data.position, data.department,
@@ -363,66 +599,77 @@ function doPost(e) {
 // =====================================
 // SYNC BATCH HANDLER
 // upsert rows ลง sheet "Job Openings YYYY" โดยใช้ HCID เป็น key
+// - ดึงปีจาก HCID (REQ-2025-001 → "Job Openings 2025")
+//   ไม่สร้าง sheet ใหม่ถ้ามีอยู่แล้ว เพียงแต่ append/update rows
+// - ถ้ายังไม่มี sheet สำหรับปีนั้น จะสร้างใหม่พร้อม header
 // =====================================
 function syncBatchHandler_(ss, rows) {
   if (!rows || rows.length === 0) return responseJson_({ success: true, synced: 0 })
 
-  var year      = new Date().getFullYear()
-  var sheetName = 'Job Openings ' + year
-  var sheet     = ss.getSheetByName(sheetName)
+  var HEADERS = [
+    'Open Jobs','Emp. Type','Job Type','HCID','Position','Rank',
+    'Department','Business Unit','PIC','Status','Offered Candidate',
+    'Offering Date','Offer Month','Offer Year','SLA Offer (Days)',
+    'Onboard Date','Contract End Date'
+  ]
+  var HCID_COL = 4  // column D (1-based)
 
-  // สร้าง sheet ใหม่ถ้ายังไม่มี
-  if (!sheet) {
-    sheet = ss.insertSheet(sheetName)
-    var headers = [
-      'Open Jobs','Emp. Type','Job Type','HCID','Position','Rank',
-      'Department','Business Unit','PIC','Status','Offered Candidate',
-      'Offering Date','Offer Month','Offer Year','SLA Offer (Days)',
-      'Onboard Date','Contract End Date'
-    ]
-    sheet.appendRow(headers)
-    sheet.getRange(1, 1, 1, headers.length)
-      .setFontWeight('bold')
-      .setBackground('#008065')
-      .setFontColor('#ffffff')
-    sheet.setFrozenRows(1)
-  }
+  // ── cache: sheetName → { sheet, rowMap } ────────────────────────────────
+  // สร้างครั้งเดียวต่อ sheet เพื่อลดจำนวน API calls
+  var sheetCache = {}
 
-  // สร้าง map: HCID → row number (สำหรับ upsert)
-  var lastRow   = sheet.getLastRow()
-  var lastCol   = sheet.getLastColumn()
-  var hcidColNo = 4   // column D = HCID (1-indexed)
-  var rowMap    = {}  // { hcId: rowNumber }
+  function getSheetContext(sheetName) {
+    if (sheetCache[sheetName]) return sheetCache[sheetName]
 
-  if (lastRow > 1) {
-    var hcidValues = sheet.getRange(2, hcidColNo, lastRow - 1, 1).getValues()
-    hcidValues.forEach(function(cell, i) {
-      if (cell[0]) rowMap[cell[0].toString().trim()] = i + 2  // +2 = skip header + 0-index
-    })
+    var sheet = ss.getSheetByName(sheetName)
+
+    // สร้าง sheet ใหม่ถ้ายังไม่มีสำหรับปีนั้น
+    if (!sheet) {
+      sheet = ss.insertSheet(sheetName)
+      sheet.appendRow(HEADERS)
+      sheet.getRange(1, 1, 1, HEADERS.length)
+        .setFontWeight('bold')
+        .setBackground('#008065')
+        .setFontColor('#ffffff')
+      sheet.setFrozenRows(1)
+    }
+
+    // สร้าง rowMap: HCID → rowNumber
+    var rowMap = {}
+    var lastRow = sheet.getLastRow()
+    if (lastRow > 1) {
+      sheet.getRange(2, HCID_COL, lastRow - 1, 1).getValues()
+        .forEach(function(cell, i) {
+          if (cell[0]) rowMap[cell[0].toString().trim()] = i + 2
+        })
+    }
+
+    sheetCache[sheetName] = { sheet: sheet, rowMap: rowMap }
+    return sheetCache[sheetName]
   }
 
   var synced = 0
+  var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+
   rows.forEach(function(r) {
     if (!r.hcId) return
 
-    // แปลง openDate เป็น readable format
+    // ใช้ sheet เดียวสำหรับทุก record (ไม่แยกตามปี)
+    var ctx = getSheetContext(JOB_OPENINGS_SHEET)
+
+    // ── แปลง dates ─────────────────────────────────────────────────────────
     var openDate = ''
     if (r.openDate) {
       try {
         var d = new Date(r.openDate)
-        var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
         openDate = d.getDate() + '-' + months[d.getMonth()] + '-' + d.getFullYear()
       } catch(_) {}
     }
 
-    var onboardDate = r.startDate || ''
-
-    // แปลง offeringDate เป็น formatted date + month + year
     var offeringDateFmt = '', offerMonth = '', offerYear = ''
     if (r.offeringDate) {
       try {
         var od = new Date(r.offeringDate)
-        var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
         offeringDateFmt = od.getDate() + '-' + months[od.getMonth()] + '-' + od.getFullYear()
         offerMonth = String(od.getMonth() + 1).padStart(2, '0')
         offerYear  = String(od.getFullYear())
@@ -430,39 +677,41 @@ function syncBatchHandler_(ss, rows) {
     }
 
     var rowData = [
-      openDate,                        // Open Jobs
-      r.employmentType || 'Monthly',   // Emp. Type
-      r.requestType || '',             // Job Type
-      r.hcId,                          // HCID
-      r.position || '',                // Position
-      r.jg || '',                      // Rank
-      r.department || '',              // Department
-      r.businessUnit || '',            // Business Unit
-      r.assignedToName || '',          // PIC
-      r.status || '',                  // Status
-      r.candidateName || '',           // Offered Candidate
-      offeringDateFmt,                 // Offering Date
-      offerMonth,                      // Offer Month
-      offerYear,                       // Offer Year
-      '',                              // SLA Offer (Days) — computed by app
-      onboardDate,                     // Onboard Date
-      r.contractEndDate || '',         // Contract End Date
+      openDate,
+      r.employmentType || 'Monthly',
+      r.requestType    || '',
+      r.hcId,
+      r.position       || '',
+      getJGLabel_(r.jg),
+      r.department     || '',
+      r.businessUnit   || '',
+      r.assignedToName || '',
+      r.status         || '',
+      r.candidateName  || '',
+      offeringDateFmt,
+      offerMonth,
+      offerYear,
+      '',                        // SLA Offer (Days) — computed separately
+      r.startDate      || '',
+      r.contractEndDate|| '',
     ]
 
-    var existingRow = rowMap[r.hcId.toString().trim()]
+    var hcIdKey     = r.hcId.toString().trim()
+    var existingRow = ctx.rowMap[hcIdKey]
+
     if (existingRow) {
-      // Update existing row — อัพเดตเฉพาะ columns ที่เปลี่ยนได้
-      sheet.getRange(existingRow, 1, 1, rowData.length).setValues([rowData])
+      // อัพเดต row ที่มีอยู่ (ไม่เขียนทับข้อมูลเดิมที่ไม่ส่งมา)
+      ctx.sheet.getRange(existingRow, 1, 1, rowData.length).setValues([rowData])
     } else {
-      // Append new row
-      sheet.appendRow(rowData)
-      // อัพเดต rowMap สำหรับ rows ถัดไปใน batch เดียวกัน
-      rowMap[r.hcId] = sheet.getLastRow()
+      // เพิ่ม row ใหม่ต่อท้าย
+      ctx.sheet.appendRow(rowData)
+      ctx.rowMap[hcIdKey] = ctx.sheet.getLastRow()
     }
     synced++
   })
 
-  return responseJson_({ success: true, synced: synced, sheet: sheetName })
+  var sheets = Object.keys(sheetCache).join(', ')
+  return responseJson_({ success: true, synced: synced, sheets: sheets })
 }
 
 // ── Helper ──────────────────────────────────────────────────────

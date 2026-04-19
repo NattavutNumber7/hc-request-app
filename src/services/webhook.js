@@ -34,6 +34,10 @@ const WEBHOOK_URL = import.meta.env.VITE_GAS_WEBHOOK_URL
 // GAS data URL for GET requests (doGet handler) — used for status updates and data queries
 const DATA_URL = import.meta.env.VITE_GAS_DATA_URL
 
+// Secret token สำหรับ GAS endpoint authentication
+// ต้องตรงกับ DEPLOY_SECRET ใน GAS Script Properties
+const GAS_SECRET = import.meta.env.VITE_GAS_SECRET || ''
+
 // ── Rate Limiting (Debounce) ──────────────────────────────────────────────────
 // Rate limiting: debounce sendStatusUpdate ต่อ docId 800ms
 // ป้องกัน spam เมื่อ user เปลี่ยน status หลายครั้งเร็วๆ
@@ -99,6 +103,7 @@ export async function sendMaintenanceAlert(active) {
   if (!DATA_URL) return
   try {
     const params = new URLSearchParams({ action: 'maintenance', active: active.toString() })
+    if (GAS_SECRET) params.set('secret', GAS_SECRET)
     await fetch(`${DATA_URL}?${params.toString()}`)
   } catch (err) {
     console.error('[sendMaintenanceAlert] error:', err)
@@ -123,22 +128,22 @@ export async function sendMaintenanceAlert(active) {
  * @returns {Promise<void|'cancelled'>} resolve เมื่อ GAS ตอบกลับ หรือ 'cancelled' ถ้าถูก debounce
  *                                      Resolves when GAS responds, or 'cancelled' if debounced away
  */
-export function sendStatusUpdate(docId, status, assignedToName = null, assignedAt = null, startDate = null, candidateName = null) {
+export function sendStatusUpdate(docId, status, assignedToName = null, assignedAt = null, startDate = null, candidateName = null, hcId = null, offeringDate = null, clearInfo = false) {
   if (!DATA_URL) {
     console.error('[sendStatusUpdate] VITE_GAS_DATA_URL not configured')
     return Promise.resolve()
   }
-  // ห่อการ call จริงด้วย debounce เพื่อกรอง rapid updates สำหรับ docId เดียวกัน
-  // Wrap the actual fetch in a debounce to coalesce rapid status changes for the same docId
   return debouncedStatusCall(docId, async () => {
     try {
-      // สร้าง query string — เพิ่ม optional params เฉพาะที่มีค่า
-      // Build query string — only append optional params that have a value
       const params = new URLSearchParams({ action: 'updateStatus', id: docId, status })
       if (assignedToName) params.set('assignedToName', assignedToName)
       if (assignedAt)     params.set('assignedAt', assignedAt)
       if (startDate)      params.set('startDate', startDate)
       if (candidateName)  params.set('candidateName', candidateName)
+      if (hcId)           params.set('hcId', hcId)
+      if (offeringDate)   params.set('offeringDate', offeringDate)
+      if (clearInfo)      params.set('clearInfo', '1')
+      if (GAS_SECRET)     params.set('secret', GAS_SECRET)
       const url = `${DATA_URL}?${params.toString()}`
       const res = await fetch(url)
       const json = await res.json()
@@ -265,6 +270,24 @@ export async function syncBatchToSheets(requests) {
  *   - message: ข้อความผลลัพธ์ภาษาไทย หรือ error message ถ้าล้มเหลว
  *              Thai result message, or the error message on failure
  */
+/**
+ * แจ้ง GAS ให้ลบ row ใน Google Sheets เมื่อ Admin ลบ request
+ * Notifies GAS to delete the corresponding row in "Job Openings" sheet.
+ *
+ * @param {string} hcId - HCID ของ request เช่น 'REQ-2026-042'
+ * @returns {Promise<void>}
+ */
+export async function sendDeleteToSheets(hcId) {
+  if (!DATA_URL || !hcId) return
+  try {
+    const params = new URLSearchParams({ action: 'deleteRow', hcId })
+    if (GAS_SECRET) params.set('secret', GAS_SECRET)
+    await fetch(`${DATA_URL}?${params.toString()}`)
+  } catch (err) {
+    console.error('[sendDeleteToSheets] error:', err)
+  }
+}
+
 export async function sendToWebhook(data) {
   if (!WEBHOOK_URL) {
     console.warn('GAS Webhook URL not configured')

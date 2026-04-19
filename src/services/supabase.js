@@ -47,11 +47,15 @@ const MAX_FILE_SIZE_MB = 10
 /** ประเภทไฟล์ที่อนุญาตสำหรับ JD (เฉพาะ PDF) / Allowed MIME types for JD files (PDF only) */
 const ALLOWED_TYPES = ['application/pdf']
 
-// ── JD Files (bucket: jd-files) ──────────────────────────────────────────────
+/** Supabase Storage bucket names — อ่านจาก env หรือใช้ default */
+const JD_BUCKET = import.meta.env.VITE_SUPABASE_JD_BUCKET || 'jd-files'
+const CV_BUCKET = import.meta.env.VITE_SUPABASE_CV_BUCKET || 'cv-files'
+
+// ── JD Files ──────────────────────────────────────────────────────────────────
 
 /**
- * อัพโหลดไฟล์ JD ไปยัง Supabase Storage bucket 'jd-files'
- * Uploads a Job Description (JD) PDF file to the 'jd-files' Supabase Storage bucket.
+ * อัพโหลดไฟล์ JD ไปยัง Supabase Storage bucket JD_BUCKET
+ * Uploads a Job Description (JD) PDF file to the JD_BUCKET Supabase Storage bucket.
  *
  * กระบวนการ / Process:
  *   1. ตรวจสอบประเภทไฟล์ (PDF เท่านั้น) / Validate file type (PDF only)
@@ -95,7 +99,7 @@ export async function uploadJDFile(file, requestId) {
     // อัพโหลดไฟล์ไปยัง Supabase Storage — upsert: false ป้องกันการเขียนทับโดยบังเอิญ
     // Upload to Supabase Storage — upsert: false prevents accidental overwrites
     const { error: uploadError } = await supabase.storage
-      .from('jd-files')
+      .from(JD_BUCKET)
       .upload(filePath, file, { upsert: false, contentType: file.type })
 
     if (uploadError) throw uploadError
@@ -103,7 +107,7 @@ export async function uploadJDFile(file, requestId) {
     // สร้าง signed URL อายุ 7 วัน (TA กดเปิดได้)
     // Create a signed URL valid for 7 days so TA staff can open the file
     const { data, error: urlError } = await supabase.storage
-      .from('jd-files')
+      .from(JD_BUCKET)
       .createSignedUrl(filePath, 60 * 60 * 24 * 7) // 604800 วินาที = 7 วัน / 604800 seconds = 7 days
 
     if (urlError) throw urlError
@@ -127,7 +131,7 @@ export async function uploadJDFile(file, requestId) {
  */
 export async function getJDSignedUrl(filePath) {
   const { data, error } = await supabase.storage
-    .from('jd-files')
+    .from(JD_BUCKET)
     .createSignedUrl(filePath, 60 * 60) // 3600 วินาที = 1 ชั่วโมง / 3600 seconds = 1 hour
 
   if (error) return null
@@ -135,8 +139,8 @@ export async function getJDSignedUrl(filePath) {
 }
 
 /**
- * ดึงรายการไฟล์ทั้งหมดใน bucket 'jd-files' พร้อมข้อมูล folder และ path
- * Lists all files in the 'jd-files' bucket, organised by request folder.
+ * ดึงรายการไฟล์ทั้งหมดใน bucket JD_BUCKET พร้อมข้อมูล folder และ path
+ * Lists all files in the JD_BUCKET bucket, organised by request folder.
  *
  * กระบวนการ 2 ขั้นตอน / Two-step process:
  *   1. ดึงรายการ folder ทั้งหมด (แต่ละ folder = 1 requestId) / List all top-level folders (each = one requestId)
@@ -152,7 +156,7 @@ export async function listJDFiles() {
     // ขั้นตอนที่ 1: ดึง top-level folders (แต่ละอันคือ requestId)
     // Step 1: List top-level "folders" — each represents one request's files
     const { data: folders, error: foldersError } = await supabase.storage
-      .from('jd-files')
+      .from(JD_BUCKET)
       .list('', { limit: 100 })
 
     if (foldersError) throw foldersError
@@ -167,7 +171,7 @@ export async function listJDFiles() {
       if (folder.name === '.emptyFolderPlaceholder') continue
 
       const { data: files, error: filesError } = await supabase.storage
-        .from('jd-files')
+        .from(JD_BUCKET)
         .list(folder.name, { limit: 100 })
 
       if (filesError) {
@@ -196,8 +200,8 @@ export async function listJDFiles() {
 }
 
 /**
- * ลบไฟล์ JD ออกจาก Supabase Storage bucket 'jd-files'
- * Deletes a JD file from the 'jd-files' Supabase Storage bucket.
+ * ลบไฟล์ JD ออกจาก Supabase Storage bucket JD_BUCKET
+ * Deletes a JD file from the JD_BUCKET Supabase Storage bucket.
  *
  * @param {string} filePath - storage path ของไฟล์ที่จะลบ (ได้จาก uploadJDFile) / Storage path of the file to delete
  * @returns {Promise<{success: boolean, error: string|null}>}
@@ -212,7 +216,7 @@ export async function deleteJDFile(filePath) {
     // remove() รับ array ของ paths — ที่นี่ลบทีละ 1 ไฟล์
     // remove() accepts an array of paths — here we delete a single file at a time
     const { error } = await supabase.storage
-      .from('jd-files')
+      .from(JD_BUCKET)
       .remove([filePath])
 
     if (error) throw error
@@ -241,11 +245,11 @@ const CV_ALLOWED_TYPES = [
 ]
 
 /**
- * อัพโหลดไฟล์ CV ไปยัง Supabase Storage bucket 'cv-files'
- * Uploads a CV file (PDF, DOC, or DOCX) to the 'cv-files' Supabase Storage bucket.
+ * อัพโหลดไฟล์ CV ไปยัง Supabase Storage bucket CV_BUCKET
+ * Uploads a CV file (PDF, DOC, or DOCX) to the CV_BUCKET Supabase Storage bucket.
  *
- * กระบวนการเหมือน uploadJDFile แต่ใช้ bucket 'cv-files' และรองรับไฟล์ประเภทเพิ่มเติม
- * Follows the same process as uploadJDFile but targets the 'cv-files' bucket
+ * กระบวนการเหมือน uploadJDFile แต่ใช้ bucket CV_BUCKET และรองรับไฟล์ประเภทเพิ่มเติม
+ * Follows the same process as uploadJDFile but targets the CV_BUCKET bucket
  * and accepts additional file types (DOC, DOCX).
  *
  * @param {File}   file      - ไฟล์ CV ที่จะอัพโหลด (PDF/DOC/DOCX, ไม่เกิน 10MB) / CV file to upload (PDF/DOC/DOCX, max 10MB)
@@ -276,10 +280,10 @@ export async function uploadCVFile(file, requestId) {
     // Build storage path with timestamp prefix to avoid name collisions
     const filePath = `${requestId}/${Date.now()}_${safeName}`
 
-    // อัพโหลดไปยัง bucket 'cv-files' — upsert: false ป้องกันการเขียนทับ
-    // Upload to the 'cv-files' bucket — upsert: false prevents accidental overwrites
+    // อัพโหลดไปยัง bucket CV_BUCKET — upsert: false ป้องกันการเขียนทับ
+    // Upload to the CV_BUCKET bucket — upsert: false prevents accidental overwrites
     const { error: uploadError } = await supabase.storage
-      .from('cv-files')
+      .from(CV_BUCKET)
       .upload(filePath, file, { upsert: false, contentType: file.type })
 
     if (uploadError) throw uploadError
@@ -287,7 +291,7 @@ export async function uploadCVFile(file, requestId) {
     // สร้าง signed URL อายุ 7 วัน สำหรับ download/view CV
     // Create a 7-day signed URL so recruiters can view/download the CV
     const { data, error: urlError } = await supabase.storage
-      .from('cv-files')
+      .from(CV_BUCKET)
       .createSignedUrl(filePath, 60 * 60 * 24 * 7) // 604800 วินาที = 7 วัน / 7 days
 
     if (urlError) throw urlError
@@ -309,7 +313,7 @@ export async function uploadCVFile(file, requestId) {
  */
 export async function getCVSignedUrl(filePath) {
   const { data, error } = await supabase.storage
-    .from('cv-files')
+    .from(CV_BUCKET)
     .createSignedUrl(filePath, 60 * 60) // 3600 วินาที = 1 ชั่วโมง / 1 hour
 
   if (error) return null
@@ -317,8 +321,8 @@ export async function getCVSignedUrl(filePath) {
 }
 
 /**
- * ลบไฟล์ CV ออกจาก Supabase Storage bucket 'cv-files'
- * Deletes a CV file from the 'cv-files' Supabase Storage bucket.
+ * ลบไฟล์ CV ออกจาก Supabase Storage bucket CV_BUCKET
+ * Deletes a CV file from the CV_BUCKET Supabase Storage bucket.
  *
  * @param {string} filePath - storage path ของไฟล์ที่จะลบ (ได้จาก uploadCVFile) / Storage path of the file to delete
  * @returns {Promise<{success: boolean, error: string|null}>}
@@ -333,7 +337,7 @@ export async function deleteCVFile(filePath) {
     // remove() รับ array ของ paths — ที่นี่ลบทีละ 1 ไฟล์
     // remove() accepts an array of paths — here we delete a single file
     const { error } = await supabase.storage
-      .from('cv-files')
+      .from(CV_BUCKET)
       .remove([filePath])
 
     if (error) throw error

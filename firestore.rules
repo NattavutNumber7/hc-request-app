@@ -2,52 +2,94 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    // ── Helper functions ───────────────────────────────────────────────────────
+
+    // ตรวจ email domain @freshket.co
     function isFreshket() {
       return request.auth != null && request.auth.token.email.matches('.*@freshket\\.co$');
     }
 
+    // ตรวจ role == 'admin' จาก Firestore users collection
     function isAdmin() {
       return isFreshket() &&
         get(/databases/$(database)/documents/users/$(request.auth.token.email)).data.role == 'admin';
     }
 
+    // ตรวจ role == 'ta' หรือ 'admin'
+    function isTA() {
+      return isFreshket() &&
+        get(/databases/$(database)/documents/users/$(request.auth.token.email)).data.role in ['ta', 'admin'];
+    }
+
+    // ── Users collection ───────────────────────────────────────────────────────
+    // อ่านได้ทุก freshket user, เขียนได้เฉพาะ admin
     match /users/{userId} {
       allow read: if isFreshket();
       allow write: if isAdmin();
     }
 
-    match /hc_requests/{document=**} {
-      allow read: if isFreshket();
-      allow write: if isFreshket();
-    }
-
-    match /hc_logs/{logId} {
-      allow read: if isFreshket();
-      allow write: if isFreshket();
-    }
-
-    match /audit_logs/{logId} {
-      allow read: if isFreshket();
-      allow write: if isFreshket();
-    }
-
-    match /custom_positions/{docId} {
-      allow read: if isFreshket();
+    // ── HC Requests collection ─────────────────────────────────────────────────
+    // create: freshket user ทุกคน (Manager ยื่น request)
+    // update: freshket user ทุกคน (TA/Manager แก้ status)
+    // delete: admin เท่านั้น (ป้องกันการลบ record โดยไม่ได้รับอนุญาต)
+    match /hc_requests/{docId} {
+      allow read:   if isFreshket();
       allow create: if isFreshket();
+      allow update: if isFreshket();
+      allow delete: if isAdmin();
+    }
+
+    // Sub-collections ของ hc_requests (comments, cv files etc.)
+    match /hc_requests/{docId}/{subcol=**} {
+      allow read:   if isFreshket();
+      allow create: if isFreshket();
+      allow update: if isFreshket();
+      allow delete: if isAdmin();
+    }
+
+    // ── HC Logs ────────────────────────────────────────────────────────────────
+    // อ่านได้ admin + TA, เขียน (append only) ได้ freshket user
+    // Note: ไม่อนุญาต delete/update เพื่อป้องกัน log tampering
+    match /hc_logs/{logId} {
+      allow read:   if isTA();
+      allow create: if isFreshket();
+      allow update, delete: if false;
+    }
+
+    // ── Audit Logs ─────────────────────────────────────────────────────────────
+    // อ่านได้ admin + TA, เขียน (append only) ได้ freshket user
+    // ป้องกัน update/delete เพื่อรักษา audit trail
+    match /audit_logs/{logId} {
+      allow read:   if isTA();
+      allow create: if isFreshket();
+      allow update, delete: if false;
+    }
+
+    // ── Custom Positions ───────────────────────────────────────────────────────
+    match /custom_positions/{docId} {
+      allow read:           if isFreshket();
+      allow create:         if isFreshket();
       allow update, delete: if isAdmin();
     }
 
-    // Maintenance Mode — ทุกคนอ่านได้, admin เท่านั้นเขียนได้
+    // ── Settings (Maintenance Mode etc.) ──────────────────────────────────────
+    // อ่านได้เฉพาะ user ที่ login แล้ว (Firebase Auth), admin เท่านั้นเขียนได้
     match /settings/{docId} {
-      allow read: if true;
+      allow read:  if request.auth != null;
       allow write: if isAdmin();
     }
 
-    // HCID Counter — ใช้สำหรับ generate REQ-YYYY-NNN sequence
-    // เขียนได้เฉพาะ freshket user (ป้องกัน counter ถูกแก้ไขจากภายนอก)
+    // ── Meta (HCID Counter) ────────────────────────────────────────────────────
+    // freshket user ทุกคนต้องเขียนได้ เพราะ generateHCID() ใช้ transaction
+    // แต่ limit ให้เฉพาะ document 'hcid_counter'
+    match /meta/hcid_counter {
+      allow read, write: if isFreshket();
+    }
+
+    // meta document อื่นๆ นอกจาก hcid_counter — admin เท่านั้น
     match /meta/{docId} {
-      allow read: if isFreshket();
-      allow write: if isFreshket();
+      allow read:  if isFreshket();
+      allow write: if isAdmin();
     }
   }
 }

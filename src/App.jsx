@@ -51,7 +51,7 @@ import { Routes, Route, Navigate } from 'react-router-dom'
 import { onAuthStateChanged } from 'firebase/auth'
 import { auth, db } from './services/firebase'
 import { fetchSheetsData, getDepartmentByEmail } from './services/sheetsData'
-import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore'
+import { doc, getDoc, setDoc, onSnapshot, serverTimestamp } from 'firebase/firestore'
 import { PowerOff, Power } from 'lucide-react'
 import { sendMaintenanceAlert } from './services/webhook'
 
@@ -138,22 +138,25 @@ export default function App() {
     })
   }
 
-  // ─── Effect: อ่านสถานะ maintenance ครั้งเดียว (one-shot, ไม่ต้อง realtime) ─
-  // ดึงข้อมูลจาก Firestore document `settings/maintenance` ตอน component mount
-  // ไม่ใช้ onSnapshot เพราะ maintenance toggle เกิดขึ้นน้อยมาก
-  // fields ที่อ่าน: active (boolean), message (string)
+  // ─── Effect: Subscribe maintenance mode (realtime) ──────────────────────────
+  // ใช้ onSnapshot แทน getDoc เพื่อให้ maintenance state อัปเดต realtime
+  // เมื่อ admin เปิด/ปิด maintenance mode ทุก session ที่ login อยู่จะได้รับทันที
+  // Subscribe เฉพาะเมื่อ user login แล้ว (rules กำหนดให้ต้อง auth)
+  // Cleanup (unsubscribe) เมื่อ user logout หรือ component unmount
   useEffect(() => {
-    getDoc(doc(db, 'settings', 'maintenance'))
-      .then((snap) => {
+    if (!user) return   // รอจนกว่า user จะ authenticate ก่อน
+    const unsub = onSnapshot(
+      doc(db, 'settings', 'maintenance'),
+      (snap) => {
         if (snap.exists()) {
-          // ถ้า document มีอยู่ ให้ set state ตามค่าใน Firestore
-          // ?? false / ?? '' เป็น nullish coalescing fallback กรณี field หาย
           setMaintenanceMode(snap.data().active ?? false)
           setMaintenanceMessage(snap.data().message ?? '')
         }
-      })
-      .catch((e) => console.error('[App] maintenance fetch failed:', e))
-  }, [])
+      },
+      (err) => console.error('[App] maintenance snapshot error:', err)
+    )
+    return () => unsub()   // unsubscribe เมื่อ user logout หรือ unmount
+  }, [user])
 
   // ─── toggleMaintenance — Admin: เปิด/ปิด maintenance mode ──────────────────
   // ขั้นตอน:

@@ -26,7 +26,7 @@
  */
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { collection, addDoc, updateDoc, doc, serverTimestamp, getDocs, query, where, runTransaction, getDoc } from 'firebase/firestore'
+import { collection, addDoc, updateDoc, doc, serverTimestamp, getDocs, query, where, orderBy, limit, runTransaction, getDoc } from 'firebase/firestore'
 import { db } from '../../services/firebase'
 import { sendToWebhook } from '../../services/webhook'
 import { logAudit } from '../../services/auditLog'
@@ -34,7 +34,7 @@ import { uploadJDFile, getJDSignedUrl } from '../../services/supabase'
 import { Loader2, CheckCircle, ChevronDown, X, Paperclip, FileText, ExternalLink } from 'lucide-react'
 import { HQ_JG_LEVELS, OPERATION_JG_LEVELS } from '../../data/jobGrades'
 import { fetchSheetsData, getDepartmentByEmail, getEmployeesByDepartment, getPositionsByDepartment } from '../../services/sheetsData'
-import { DIVISIONS, getDepartments, getSections, getBusinessUnits } from '../../data/orgStructure'
+import { DIVISIONS, getDepartments, getSections, getBusinessUnits, getDivisionByDepartment } from '../../data/orgStructure'
 
 // ─── ค่าเริ่มต้นของฟอร์ม ───────────────────────────────────────────────────
 // ใช้เป็น template สำหรับ reset หลัง submit สำเร็จ
@@ -307,7 +307,8 @@ export default function HCRequestForm({ user, role, maintenanceMode = false }) {
         const dept = getDepartmentByEmail(managers, user.email)
         if (dept) {
           const cfg = getTrackConfigByDepartment(dept)
-          setForm((prev) => ({ ...prev, department: dept, orgTrack: cfg.defaultTrack }))
+          const div = getDivisionByDepartment(dept)   // หา division จาก department
+          setForm((prev) => ({ ...prev, department: dept, division: div, orgTrack: cfg.defaultTrack }))
           setDeptAutoFilled(true)
         }
       })
@@ -438,19 +439,45 @@ export default function HCRequestForm({ user, role, maintenanceMode = false }) {
   // ─── generateHCID ─────────────────────────────────────────────────────────
   // สร้าง HCID ในรูปแบบ REQ-YYYY-NNN โดยใช้ Firestore transaction เพื่อป้องกัน race condition
   // อ่าน/อัพเดต counter ใน document 'meta/hcid_counter' อย่าง atomic
+  //
+  // Auto-init: ถ้า counter ยังไม่มี (ครั้งแรก) → ดึง max HCID จาก hc_requests ที่มีอยู่
+  // แล้วเริ่มนับต่อจากนั้น — ไม่ต้องตั้งค่าใน Firebase Console เอง
   // ถ้าปีเปลี่ยน → reset seq เป็น 1 อัตโนมัติ
   async function generateHCID() {
-    const counterRef = doc(db, 'meta', 'hcid_counter')
+    const counterRef  = doc(db, 'meta', 'hcid_counter')
     const currentYear = new Date().getFullYear()
+    const prefix      = `REQ-${currentYear}-`
 
+    // ── ตรวจก่อนว่า counter มีอยู่แล้วหรือยัง (ทำนอก transaction เพราะ query ใช้ใน tx ไม่ได้) ──
+    let fallbackSeq = 0
+    const counterSnap = await getDoc(counterRef)
+    if (!counterSnap.exists() || counterSnap.data().year !== currentYear) {
+      // ดึง hcId สูงสุดของปีนี้จาก Firestore เพื่อเริ่มนับต่อ
+      const q = query(
+        collection(db, 'hc_requests'),
+        where('hcId', '>=', prefix),
+        where('hcId', '<',  prefix + '\uf8ff'),  // range query ครอบทุก suffix
+        orderBy('hcId', 'desc'),
+        limit(1)
+      )
+      const snap = await getDocs(q)
+      if (!snap.empty) {
+        const maxHcId = snap.docs[0].data().hcId      // เช่น "REQ-2026-411"
+        fallbackSeq   = parseInt(maxHcId.split('-')[2]) || 0
+      }
+    }
+
+    // ── Transaction: อ่าน → increment → เขียน (atomic) ─────────────────────
     const newSeq = await runTransaction(db, async (tx) => {
       const snap = await tx.get(counterRef)
-      let seq = 1
+      let seq
 
-      if (snap.exists()) {
-        const data = snap.data()
-        // reset เมื่อขึ้นปีใหม่
-        seq = data.year === currentYear ? (data.seq || 0) + 1 : 1
+      if (snap.exists() && snap.data().year === currentYear) {
+        // ปกติ: increment จาก counter ที่มีอยู่
+        seq = (snap.data().seq || 0) + 1
+      } else {
+        // ครั้งแรก / ขึ้นปีใหม่: เริ่มจาก fallbackSeq ที่ดึงมา
+        seq = fallbackSeq + 1
       }
 
       tx.set(counterRef, { year: currentYear, seq })
