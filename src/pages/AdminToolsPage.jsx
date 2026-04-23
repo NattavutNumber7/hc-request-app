@@ -21,8 +21,9 @@
 import { useState } from 'react'
 import { collection, getDocs, writeBatch } from 'firebase/firestore'
 import { db } from '../services/firebase'
-import { Clock, Tag, FileText, Trash2, DatabaseZap, Settings2, AlertTriangle } from 'lucide-react'
+import { Clock, Tag, FileText, Trash2, DatabaseZap, Settings2, AlertTriangle, RefreshCw, CheckCircle2, AlertCircle } from 'lucide-react'
 import { listJDFiles, deleteJDFile } from '../services/supabase'
+import { syncFromSheets } from '../services/webhook'
 import Layout from '../components/Shared/Layout'
 
 export default function AdminToolsPage({ user, role, isDarkMode, toggleDarkMode }) {
@@ -32,6 +33,25 @@ export default function AdminToolsPage({ user, role, isDarkMode, toggleDarkMode 
 
   // key ของ tool ที่กำลังรอการยืนยันจาก confirm modal (null = ไม่มี modal เปิด)
   const [confirm, setConfirm] = useState(null)
+
+  // ── Sync from Sheets state ────────────────────────────────────────────────
+  const [syncState,  setSyncState]  = useState('idle')  // 'idle'|'running'|'done'|'error'
+  const [syncResult, setSyncResult] = useState(null)
+
+  async function handleSyncSheets() {
+    if (syncState === 'running') return
+    setSyncState('running')
+    setSyncResult(null)
+    try {
+      const res = await syncFromSheets()
+      setSyncResult(res)
+      setSyncState(res.success ? 'done' : 'error')
+    } catch (err) {
+      setSyncResult({ success: false, error: err.message })
+      setSyncState('error')
+    }
+    setTimeout(() => { setSyncState('idle'); setSyncResult(null) }, 6000)
+  }
 
   /**
    * bulkDeleteCollection — ลบทุก document ใน Firestore collection ที่กำหนด
@@ -135,6 +155,54 @@ export default function AdminToolsPage({ user, role, isDarkMode, toggleDarkMode 
             <h1 className="text-lg font-black text-gray-900 dark:text-gray-100">Admin Tools</h1>
             <p className="text-xs text-gray-500 dark:text-slate-400">Bulk clear database — ไม่สามารถย้อนกลับได้</p>
           </div>
+        </div>
+
+        {/* ── Sync from Sheets card ───────────────────────────────────────────── */}
+        <div className="rounded-2xl border p-5 bg-emerald-50 dark:bg-emerald-900/10 border-emerald-200 dark:border-emerald-800 mb-2">
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <span className="text-emerald-600 dark:text-emerald-400"><RefreshCw size={20} /></span>
+              <div>
+                <p className="text-sm font-black text-emerald-700 dark:text-emerald-400">Sync จาก Google Sheets → Firestore</p>
+                <p className="text-xs text-gray-500 dark:text-slate-400 mt-0.5">
+                  ดึง Status / PIC / Candidate ที่ TA แก้ใน Sheets อัปเดตกลับมา Firestore
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={handleSyncSheets}
+              disabled={syncState === 'running'}
+              className={`flex items-center gap-2 text-xs font-black px-4 py-2 rounded-xl border transition-all shrink-0 shadow-sm
+                ${syncState === 'running'
+                  ? 'bg-gray-100 dark:bg-slate-800 border-gray-200 dark:border-slate-700 text-gray-400 cursor-wait'
+                  : syncState === 'done'
+                    ? 'bg-emerald-100 dark:bg-emerald-800/40 border-emerald-300 dark:border-emerald-700 text-emerald-700 dark:text-emerald-300'
+                    : syncState === 'error'
+                      ? 'bg-red-50 dark:bg-red-900/30 border-red-300 dark:border-red-800 text-red-600 dark:text-red-400'
+                      : 'bg-white dark:bg-slate-800 border-emerald-300 dark:border-emerald-700 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-100 dark:hover:bg-emerald-800/40'
+                }`}
+            >
+              {syncState === 'running' ? (
+                <><Settings2 size={13} className="animate-spin"/> กำลัง Sync...</>
+              ) : syncState === 'done' ? (
+                <><CheckCircle2 size={13}/> Synced {syncResult?.synced ?? 0} / {syncResult?.total ?? 0} rows</>
+              ) : syncState === 'error' ? (
+                <><AlertCircle size={13}/> {syncResult?.error || 'Error'}</>
+              ) : (
+                <><RefreshCw size={13}/> Sync Now</>
+              )}
+            </button>
+          </div>
+
+          {/* แสดง error list ถ้ามี (สูงสุด 5 rows) */}
+          {syncState === 'done' && syncResult?.errors?.length > 0 && (
+            <div className="mt-3 pt-3 border-t border-emerald-200 dark:border-emerald-800">
+              <p className="text-[10px] font-black uppercase tracking-widest text-orange-500 dark:text-orange-400 mb-1">ไม่พบ HCID ({syncResult.errors.length} rows)</p>
+              {syncResult.errors.slice(0, 5).map((e, i) => (
+                <p key={i} className="text-[10px] text-gray-400 dark:text-slate-500 font-mono">{e.hcId}: {e.error}</p>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="flex flex-col gap-4">

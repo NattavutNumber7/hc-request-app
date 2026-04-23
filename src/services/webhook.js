@@ -236,21 +236,22 @@ export async function syncBatchToSheets(requests) {
   // If there are no valid rows after filtering, skip the POST entirely
   if (!rows.length) return
 
-  try {
-    // POST ด้วย Content-Type: text/plain + mode: no-cors
-    // GAS ไม่รองรับ CORS preflight สำหรับ application/json ดังนั้นใช้ text/plain
-    // แต่ GAS สามารถอ่าน e.postData.contents และ JSON.parse ได้ปกติ
-    // Use Content-Type: text/plain with mode: no-cors because GAS cannot handle CORS preflight.
-    // GAS can still parse e.postData.contents as JSON on the server side.
-    await fetch(WEBHOOK_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain' },
-      body: JSON.stringify({ action: 'syncBatch', rows }),
-      mode: 'no-cors', // response จะเป็น opaque — ถือว่าสำเร็จถ้าไม่ throw / Response is opaque — success assumed if no throw
-    })
-    console.log('[syncBatchToSheets] synced', rows.length, 'rows to Sheets')
-  } catch (err) {
-    console.error('[syncBatchToSheets] error:', err)
+  // ── แบ่ง rows เป็น chunk ขนาด 100 แล้วส่งทีละ chunk ───────────────────────
+  // GAS มี execution time limit — ส่งทีละ 100 แถวป้องกัน timeout
+  const CHUNK = 100
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    const chunk = rows.slice(i, i + CHUNK)
+    try {
+      await fetch(WEBHOOK_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain' },
+        body: JSON.stringify({ action: 'syncBatch', rows: chunk }),
+        mode: 'no-cors',
+      })
+      console.log(`[syncBatchToSheets] chunk ${Math.floor(i/CHUNK)+1}: synced ${chunk.length} rows (${i+chunk.length}/${rows.length})`)
+    } catch (err) {
+      console.error(`[syncBatchToSheets] chunk ${Math.floor(i/CHUNK)+1} error:`, err)
+    }
   }
 }
 
@@ -285,6 +286,99 @@ export async function sendDeleteToSheets(hcId) {
     await fetch(`${DATA_URL}?${params.toString()}`)
   } catch (err) {
     console.error('[sendDeleteToSheets] error:', err)
+  }
+}
+
+/**
+ * Sync ข้อมูลจาก Google Sheets → Firestore แบบ on-demand (เร็ว)
+ *
+ * แนวทาง: GAS แค่ return rows เป็น JSON (ไม่ยุ่ง Firestore)
+ * แล้ว frontend query + writeBatch ใน Firebase SDK เอง
+ * → เร็วกว่าการให้ GAS เรียก Firestore REST API ทีละ row ~10×
+ *
+ * Status mapping: Sheets display → app internal
+ *   "Active Sourcing" → "Recruiting", "Pending Offer" → "Offering" ฯลฯ
+ *
+ * @returns {Promise<{success: boolean, synced: number, total: number}>}
+ */
+export async function syncFromSheets() {
+  if (!DATA_URL) return { success: false, error: 'VITE_GAS_DATA_URL not configured' }
+
+  // ── แปลง Sheets display status → internal app status ─────────────────────
+  const SHEETS_TO_APP = {
+    'To be confirmed': 'Open',          // new mapping: GAS เขียน 'To be confirmed' สำหรับ Open
+    'Open':            'Open',          // legacy (เผื่อมีค่าเก่า)
+    'Active Sourcing': 'Recruiting',
+    'Interviewing':    'Interviewing',  // legacy
+    'Pending Offer':   'Offering',
+    'Pending Onboard': 'Onboarding',
+    'Onboard':         'Closed',
+    'Turndown':        'Rejected',      // legacy
+    'Job Cancelled':   'Cancelled',
+    'On hold':         'Open',          // On hold → treat as Open in app
+    'Internal Transfer': 'Closed',      // Internal Transfer → Closed
+    'Confidential':    'Recruiting',    // Confidential → still recruiting
+    // passthrough — in case internal names are written directly in Sheets
+    'Recruiting': 'Recruiting', 'Offering':  'Offering',
+    'Onboarding': 'Onboarding', 'Closed':    'Closed',
+    'Rejected':   'Rejected',   'Cancelled': 'Cancelled',
+  }
+
+  try {
+    // ── Step 1: ดึง rows จาก GAS (อ่าน Sheets เท่านั้น ไม่ยุ่ง Firestore) ──
+    const { collection, query, where, getDocs, writeBatch } =
+      await import('firebase/firestore')
+    const { db } = await import('./firebase')
+
+    const params = new URLSearchParams({ action: 'getSheetData' })
+    if (GAS_SECRET) params.set('secret', GAS_SECRET)
+    const gasRes  = await fetch(`${DATA_URL}?${params.toString()}`)
+    const gasJson = await gasRes.json()
+    if (!gasJson.success) return { success: false, error: gasJson.error }
+
+    const rows = gasJson.rows || []
+    if (!rows.length) return { success: true, synced: 0, total: 0 }
+
+    // ── Step 2: Query Firestore หา docRef จาก hcId ───────────────────────────
+    // Firestore 'in' query รองรับสูงสุด 30 items ต่อ chunk
+    const hcIds  = rows.map(r => r.hcId).filter(Boolean)
+    const docMap = {}   // hcId → DocumentReference
+
+    for (let i = 0; i < hcIds.length; i += 30) {
+      const chunk = hcIds.slice(i, i + 30)
+      const q     = query(collection(db, 'hc_requests'), where('hcId', 'in', chunk))
+      const snap  = await getDocs(q)
+      snap.forEach(d => { docMap[d.data().hcId] = d.ref })
+    }
+
+    // ── Step 3: writeBatch — อัปเดตทุก doc ในครั้งเดียว ─────────────────────
+    // Firestore batch รองรับสูงสุด 500 operations ต่อ batch
+    let synced = 0
+    for (let i = 0; i < rows.length; i += 400) {
+      const batch = writeBatch(db)
+      rows.slice(i, i + 400).forEach(row => {
+        const ref = docMap[row.hcId]
+        if (!ref) return
+
+        const update = {}
+        const appStatus = SHEETS_TO_APP[row.status]
+        if (appStatus)     update.status         = appStatus
+        if (row.pic)       update.assignedToName = row.pic
+        if (row.candidate) update.candidateName  = row.candidate
+        if (row.startDate) update.startDate      = row.startDate
+
+        if (Object.keys(update).length > 0) {
+          batch.update(ref, update)
+          synced++
+        }
+      })
+      await batch.commit()
+    }
+
+    return { success: true, synced, total: rows.length }
+  } catch (err) {
+    console.error('[syncFromSheets] error:', err)
+    return { success: false, error: err.message }
   }
 }
 

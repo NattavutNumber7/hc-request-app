@@ -27,8 +27,21 @@ import { useState, useRef, useEffect } from 'react'
 import { doc, collection, writeBatch, getDocs, query, where, limit } from 'firebase/firestore'
 import { db } from '../../services/firebase'
 import { syncBatchToSheets } from '../../services/webhook'
-import { FolderOpen, Plus, Settings2, RefreshCw } from 'lucide-react'
+import { FolderOpen, Plus, Settings2, RefreshCw, Link, Loader2 } from 'lucide-react'
 import Layout from '../Shared/Layout'
+
+// ─── convertToCSVUrl — แปลง Google Sheets URL → CSV export URL ───────────────
+// รองรับ: /edit, /view, /pub, หรือ export URL โดยตรง
+// ถ้าไม่ใช่ Google Sheets URL → return URL เดิม
+function convertToCSVUrl(url) {
+  const m = url.match(/spreadsheets\/d\/([a-zA-Z0-9_-]+)/)
+  if (!m) return url  // ไม่ใช่ Google Sheets → ใช้ URL ตรงๆ
+
+  const id  = m[1]
+  // ดึง gid (sheet tab ID) ถ้ามีใน URL (เช่น #gid=123456789 หรือ gid=123456789)
+  const gid = url.match(/[#&?]gid=(\d+)/)?.[1] || '0'
+  return `https://docs.google.com/spreadsheets/d/${id}/export?format=csv&gid=${gid}`
+}
 
 // ─── STATUS_MAP: แปลง status จาก CSV/Excel → Firestore status ─────────────────
 // key: ค่า status ใน CSV (lowercase ทั้งหมด) ที่มักมีหลากหลาย variant
@@ -141,6 +154,11 @@ export default function ImportPage({ user, role, isDarkMode, toggleDarkMode }) {
 
   // ─── State: TA Lookup ──────────────────────────────────────────────────────
   const [allTAs, setAllTAs] = useState([]) // รายชื่อ TA/Admin ทั้งหมดจาก Firestore สำหรับ getEmailFromPicName()
+
+  // ─── State: URL Import ────────────────────────────────────────────────────
+  const [csvUrl,      setCsvUrl]      = useState('')  // URL ที่ user วางไว้
+  const [urlLoading,  setUrlLoading]  = useState(false) // กำลัง fetch URL อยู่
+  const [urlError,    setUrlError]    = useState('')  // error message จาก fetch URL
 
   // ─── Refs ──────────────────────────────────────────────────────────────────
   const fileRef = useRef(null) // ref ของ hidden file input (ยังไม่ได้ใช้งาน แต่เตรียมไว้)
@@ -403,6 +421,74 @@ export default function ImportPage({ user, role, isDarkMode, toggleDarkMode }) {
 
   // ─────────────────────────────────────────────────────────────────────────────
   /**
+   * fetchFromUrl — fetch CSV จาก URL แล้วส่งต่อให้ processRawRows()
+   *
+   * - รองรับ Google Sheets URL → auto-convert เป็น CSV export URL
+   * - รองรับ URL ของไฟล์ CSV โดยตรง
+   * - ถ้า fetch ไม่ได้ (CORS, private sheet ฯลฯ) → แสดง error ให้ user ดาวน์โหลดเองแทน
+   */
+  async function fetchFromUrl() {
+    const raw = csvUrl.trim()
+    if (!raw) return
+    setUrlLoading(true)
+    setUrlError('')
+    try {
+      const gasDataUrl = import.meta.env.VITE_GAS_DATA_URL
+      const gasSecret  = import.meta.env.VITE_GAS_SECRET
+
+      // ── ตรวจว่าเป็น Google Sheets URL ────────────────────────────────────
+      const sheetsMatch = raw.match(/spreadsheets\/d\/([a-zA-Z0-9_-]+)/)
+      if (sheetsMatch) {
+        // ใช้ fetchSheetById — GAS เปิด Sheet โดยตรงด้วย SpreadsheetApp (ไม่ต้อง public)
+        const spreadsheetId = sheetsMatch[1]
+        const gid           = raw.match(/[#&?]gid=(\d+)/)?.[1] || '0'
+        const params = new URLSearchParams({ action: 'fetchSheetById', spreadsheetId, gid })
+        if (gasSecret) params.set('secret', gasSecret)
+
+        const res  = await fetch(`${gasDataUrl}?${params.toString()}`)
+        const json = await res.json()
+        if (!json.success) throw new Error(json.error || 'เปิด Sheet ไม่ได้')
+
+        // แปลง headers + rows array → array of objects (เหมือน sheet_to_json)
+        const { headers, rows: rawRows } = json
+        const objects = rawRows
+          .filter(row => row.some(cell => cell !== '' && cell !== null && cell !== undefined))
+          .map(row => {
+            const obj = {}
+            headers.forEach((h, i) => { obj[h] = row[i] ?? '' })
+            return obj
+          })
+
+        processRawRows(objects, { name: 'Google Sheets' })
+        setCsvUrl('')
+
+      } else {
+        // ── URL อื่น (CSV โดยตรง) → ใช้ fetchCSV proxy ────────────────────
+        const params = new URLSearchParams({ action: 'fetchCSV', url: raw })
+        if (gasSecret) params.set('secret', gasSecret)
+
+        const res  = await fetch(`${gasDataUrl}?${params.toString()}`)
+        const json = await res.json()
+        if (!json.success) throw new Error(json.error || 'Fetch ไม่สำเร็จ')
+
+        const mod  = await import('xlsx')
+        const XLSX = mod.default ?? mod
+        const wb   = XLSX.read(json.csv, { type: 'string', cellDates: true })
+        const ws   = wb.Sheets[wb.SheetNames[0]]
+        const rows = XLSX.utils.sheet_to_json(ws, { defval: '' })
+
+        processRawRows(rows, { name: raw.split('/').pop() || 'URL Import' })
+        setCsvUrl('')
+      }
+    } catch (err) {
+      console.error('[fetchFromUrl]', err)
+      setUrlError(err.message || 'Fetch ไม่สำเร็จ')
+    }
+    setUrlLoading(false)
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  /**
    * handleImport — นำเข้าข้อมูลทั้งหมดใน rows เข้า Firestore ด้วย writeBatch
    *
    * ขั้นตอน:
@@ -515,16 +601,56 @@ export default function ImportPage({ user, role, isDarkMode, toggleDarkMode }) {
           </div>
         </div>
 
-        {/* ── Step 1: File Drop Zone ──────────────────────────────────────────
-         * แสดงเฉพาะเมื่อยังไม่มี rows (ยังไม่ได้เลือกไฟล์) และ import ยังไม่เสร็จ
+        {/* ── Step 1: Input Zone (URL + File) ───────────────────────────────
+         * แสดงเฉพาะเมื่อยังไม่มี rows และ import ยังไม่เสร็จ
          */}
         {!rows.length && !done && (
-          <label className="flex flex-col items-center justify-center w-full h-48 border-2 border-dashed border-gray-300 dark:border-slate-700 rounded-2xl cursor-pointer hover:border-blue-400 dark:hover:border-blue-600 hover:bg-blue-50/50 dark:hover:bg-blue-900/10 transition-colors">
-            <FolderOpen size={32} className="text-gray-300 dark:text-slate-600 mb-3"/>
-            <p className="text-sm font-bold text-gray-500 dark:text-slate-400">คลิกหรือลากไฟล์มาวาง</p>
-            <p className="text-xs text-gray-400 dark:text-slate-600 mt-1">.xlsx หรือ .csv</p>
-            <input id="import-file" name="import-file" type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleFile} ref={fileRef}/>
-          </label>
+          <div className="flex flex-col gap-3">
+            {/* URL input — วาง Google Sheets link ได้เลย */}
+            <div className="flex gap-2">
+              <div className="relative flex-1">
+                <Link size={14} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400 dark:text-slate-500 pointer-events-none"/>
+                <input
+                  type="url"
+                  value={csvUrl}
+                  onChange={e => { setCsvUrl(e.target.value); setUrlError('') }}
+                  onKeyDown={e => e.key === 'Enter' && !urlLoading && csvUrl.trim() && fetchFromUrl()}
+                  placeholder="วาง Google Sheets URL หรือ CSV link แล้วกด Load..."
+                  className="w-full pl-9 pr-4 py-2.5 text-sm rounded-xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-gray-800 dark:text-gray-200 placeholder:text-gray-400 dark:placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-400 transition"
+                />
+              </div>
+              <button
+                onClick={fetchFromUrl}
+                disabled={!csvUrl.trim() || urlLoading}
+                className="flex items-center gap-2 px-4 py-2.5 text-sm font-black rounded-xl bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40 transition shadow-md shadow-blue-500/20"
+              >
+                {urlLoading ? <Loader2 size={14} className="animate-spin"/> : <Link size={14}/>}
+                {urlLoading ? 'Loading...' : 'Load'}
+              </button>
+            </div>
+
+            {/* Error message จาก URL fetch */}
+            {urlError && (
+              <p className="text-xs font-bold text-red-500 dark:text-red-400 px-1">
+                ⚠ {urlError}
+              </p>
+            )}
+
+            {/* Divider */}
+            <div className="flex items-center gap-3 text-xs text-gray-400 dark:text-slate-600">
+              <div className="flex-1 border-t border-gray-200 dark:border-slate-800"/>
+              <span className="font-bold uppercase tracking-widest">หรืออัปโหลดไฟล์</span>
+              <div className="flex-1 border-t border-gray-200 dark:border-slate-800"/>
+            </div>
+
+            {/* File Drop Zone */}
+            <label className="flex flex-col items-center justify-center w-full h-36 border-2 border-dashed border-gray-300 dark:border-slate-700 rounded-2xl cursor-pointer hover:border-blue-400 dark:hover:border-blue-600 hover:bg-blue-50/50 dark:hover:bg-blue-900/10 transition-colors">
+              <FolderOpen size={28} className="text-gray-300 dark:text-slate-600 mb-2"/>
+              <p className="text-sm font-bold text-gray-500 dark:text-slate-400">คลิกหรือลากไฟล์มาวาง</p>
+              <p className="text-xs text-gray-400 dark:text-slate-600 mt-0.5">.xlsx หรือ .csv</p>
+              <input id="import-file" name="import-file" type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleFile} ref={fileRef}/>
+            </label>
+          </div>
         )}
 
         {/* ── Step 2: Preview Table + Import Button ──────────────────────────
@@ -540,10 +666,21 @@ export default function ImportPage({ user, role, isDarkMode, toggleDarkMode }) {
                 <p className="text-xs text-gray-500 dark:text-slate-400 mt-0.5">พบ <span className="font-black text-blue-600 dark:text-blue-400">{rows.length}</span> รายการ</p>
               </div>
               <div className="flex gap-2">
-                {/* ปุ่มเปลี่ยนไฟล์: reset rows และ fileName กลับไปหน้าเลือกไฟล์ */}
+                {/* ปุ่มเปลี่ยนไฟล์ */}
                 <button onClick={() => { setRows([]); setFileName('') }}
                   className="px-3 py-1.5 text-xs font-bold rounded-xl border border-gray-200 dark:border-slate-700 text-gray-500 dark:text-slate-400 hover:bg-gray-50 dark:hover:bg-slate-800 transition-colors">
                   เปลี่ยนไฟล์
+                </button>
+                {/* ปุ่ม Sync ไป Sheets เท่านั้น (ไม่แตะ Firestore) */}
+                <button onClick={async () => {
+                    setSyncing(true); setSyncDone(false)
+                    await syncBatchToSheets(rows)
+                    setSyncing(false); setSyncDone(true)
+                    setTimeout(() => setSyncDone(false), 5000)
+                  }}
+                  disabled={syncing}
+                  className="flex items-center gap-1.5 px-4 py-1.5 text-xs font-black rounded-xl border border-indigo-300 dark:border-indigo-700 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 transition-colors disabled:opacity-50">
+                  {syncing ? <><RefreshCw size={12} className="animate-spin"/> Syncing...</> : syncDone ? <>✓ Synced!</> : <><RefreshCw size={12}/> Sheets Only</>}
                 </button>
                 {/* ปุ่ม Import: แสดง progress (imported/total) ขณะกำลัง import */}
                 <button onClick={handleImport} disabled={importing}

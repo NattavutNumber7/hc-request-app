@@ -78,6 +78,7 @@ function onSheetEdit(e) {
     // อ่านค่าทั้งหมดที่ sync ได้
     var status        = sheet.getRange(row, COL_STATUS).getValue()
     var pic           = sheet.getRange(row, COL_PIC).getValue()
+
     var candidateName = sheet.getRange(row, COL_CANDIDATE).getValue()
     var startDate     = sheet.getRange(row, COL_START_DATE).getValue()
 
@@ -389,12 +390,7 @@ function doGet(e) {
       if (!VALID.includes(newStatus)) return responseJson_({ success: false, error: 'Invalid status: ' + newStatus })
 
       // ── แปลง internal status → Sheets status ──────────────────────────────
-      const STATUS_MAP = {
-        Open: 'Open', Recruiting: 'Active Sourcing', Interviewing: 'Interviewing',
-        Offering: 'Pending Offer', Onboarding: 'Pending Onboard',
-        Closed: 'Onboard', Rejected: 'Turndown', Cancelled: 'Job Cancelled',
-      }
-      const sheetsStatus = STATUS_MAP[newStatus] || newStatus
+      const sheetsStatus = toSheetsStatus_(newStatus)
 
       var position = '', dept = '', oldStatus = ''
 
@@ -411,7 +407,9 @@ function doGet(e) {
               dept      = jobSheet.getRange(rowNum, COL_DEPT).getValue()
 
               jobSheet.getRange(rowNum, COL_STATUS).setValue(sheetsStatus)
-              if (assignedToName) jobSheet.getRange(rowNum, COL_PIC).setValue(assignedToName)
+              if (assignedToName) {
+                jobSheet.getRange(rowNum, COL_PIC).setValue(assignedToName)
+              }
               if (clearInfo) {
                 jobSheet.getRange(rowNum, COL_CANDIDATE).setValue('')   // ล้างชื่อ Candidate
                 jobSheet.getRange(rowNum, COL_START_DATE).setValue('')  // ล้างวันเริ่มงาน
@@ -424,14 +422,14 @@ function doGet(e) {
                 jobSheet.getRange(rowNum, COL_OFFER_DATE).setValue('')
                 jobSheet.getRange(rowNum, 13).setValue('')  // Offer Month
                 jobSheet.getRange(rowNum, 14).setValue('')  // Offer Year
-                jobSheet.getRange(rowNum, 15).setValue('')  // SLA Offer (days)
+                jobSheet.getRange(rowNum, 15).setValue('')  // SLA Offer (Y.M.D)
               } else if (offeringDate) {
                 var od = new Date(offeringDate)
                 var oMonths = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
                 jobSheet.getRange(rowNum, COL_OFFER_DATE).setValue(od.getDate() + '-' + oMonths[od.getMonth()] + '-' + od.getFullYear())
                 jobSheet.getRange(rowNum, 13).setValue(String(od.getMonth() + 1).padStart(2, '0'))  // Offer Month
                 jobSheet.getRange(rowNum, 14).setValue(String(od.getFullYear()))                    // Offer Year
-                // SLA Offer = จำนวนวันตั้งแต่ Open Date ถึง Offering Date (col O = 15)
+                // SLA Offer (Y.M.D) = จำนวนวันตั้งแต่ Open Date ถึง Offering Date (col O = 15)
                 var openDateVal = jobSheet.getRange(rowNum, COL_OPEN_JOBS).getValue()
                 if (openDateVal) {
                   var openDateObj = openDateVal instanceof Date ? openDateVal : new Date(openDateVal)
@@ -478,6 +476,148 @@ function doGet(e) {
       return responseJson_({ success: true })
     } catch (err) {
       return responseJson_({ success: false, error: err.message })
+    }
+  }
+
+  // ── FETCH CSV PROXY: ดึง CSV จาก URL ผ่าน GAS (ไม่มีปัญหา CORS) ─────────────
+  // เรียกด้วย ?action=fetchCSV&url=ENCODED_URL&secret=XXX
+  // GAS ใช้ UrlFetchApp ซึ่งทำงาน server-side ไม่ถูก browser CORS block
+  if (e.parameter.action === 'fetchCSV') {
+    if (!isValidSecret_(e)) return responseJson_({ error: 'Unauthorized' })
+    var fetchUrl = e.parameter.url
+    if (!fetchUrl) return responseJson_({ error: 'Missing url parameter' })
+    try {
+      var fetchResp = UrlFetchApp.fetch(fetchUrl, {
+        muteHttpExceptions: true,
+        followRedirects: true,
+      })
+      var fetchCode = fetchResp.getResponseCode()
+      if (fetchCode !== 200) return responseJson_({ error: 'HTTP ' + fetchCode + ' — ตรวจสอบว่า Sheet เป็น public' })
+      var csvText = fetchResp.getContentText()
+      // ตรวจว่าเป็น HTML (Google login redirect) แทนที่จะเป็น CSV
+      if (csvText.trim().startsWith('<')) return responseJson_({ error: 'Sheet ต้องเป็น public — เปิด "Anyone with link can view"' })
+      return ContentService
+        .createTextOutput(JSON.stringify({ success: true, csv: csvText }))
+        .setMimeType(ContentService.MimeType.JSON)
+    } catch (fcErr) {
+      return responseJson_({ error: fcErr.message })
+    }
+  }
+
+  // ── FETCH SHEET BY ID: อ่าน Sheet โดยตรงผ่าน SpreadsheetApp (ไม่ต้อง public) ────
+  // GAS รันในฐานะเจ้าของ script ซึ่งมี access ถึง Sheet ใน same Google account อยู่แล้ว
+  // เรียกด้วย ?action=fetchSheetById&spreadsheetId=XXX&gid=YYY&secret=XXX
+  // return: { success: true, headers: [...], rows: [[...], ...] }
+  if (e.parameter.action === 'fetchSheetById') {
+    if (!isValidSecret_(e)) return responseJson_({ error: 'Unauthorized' })
+    var fsbId  = e.parameter.spreadsheetId
+    var fsbGid = e.parameter.gid || '0'
+    if (!fsbId) return responseJson_({ error: 'Missing spreadsheetId' })
+    try {
+      var fsbSs = SpreadsheetApp.openById(fsbId)
+      // ค้นหา sheet ตาม gid
+      var fsbSheet = null
+      var fsbSheets = fsbSs.getSheets()
+      for (var si = 0; si < fsbSheets.length; si++) {
+        if (String(fsbSheets[si].getSheetId()) === String(fsbGid)) {
+          fsbSheet = fsbSheets[si]
+          break
+        }
+      }
+      if (!fsbSheet) fsbSheet = fsbSs.getSheets()[0] // fallback → sheet แรก
+      var fsbLastRow = fsbSheet.getLastRow()
+      var fsbLastCol = fsbSheet.getLastColumn()
+      if (fsbLastRow < 2 || fsbLastCol < 1) return responseJson_({ success: true, headers: [], rows: [] })
+      var fsbAll     = fsbSheet.getRange(1, 1, fsbLastRow, fsbLastCol).getValues()
+      var fsbHeaders = fsbAll[0].map(function(h) { return String(h).trim() })
+      var fsbRows    = fsbAll.slice(1)
+      return ContentService
+        .createTextOutput(JSON.stringify({ success: true, headers: fsbHeaders, rows: fsbRows }))
+        .setMimeType(ContentService.MimeType.JSON)
+    } catch (fsbErr) {
+      return responseJson_({ error: fsbErr.message })
+    }
+  }
+
+  // ── TEST WRITE: เขียน 1 row ทดสอบลง Sheet แล้วคืน JSON — ใช้ debug ว่า GAS เขียน Sheet ได้จริงมั้ย ──
+  // เรียกด้วย ?action=testWrite&secret=XXX  (เปิด URL ใน browser ได้เลย — GET response อ่านได้)
+  if (e.parameter.action === 'testWrite') {
+    if (!isValidSecret_(e)) return responseJson_({ error: 'Unauthorized' })
+    try {
+      var twSheet = ss ? ss.getSheetByName(JOB_OPENINGS_SHEET) : null
+      if (!ss)      return responseJson_({ error: 'getActiveSpreadsheet() returned null — script ไม่ได้ bind กับ spreadsheet' })
+      if (!twSheet) return responseJson_({ error: 'Sheet not found: ' + JOB_OPENINGS_SHEET + ' | available: ' + ss.getSheets().map(function(s){return s.getName()}).join(', ') })
+      var twLastRow = twSheet.getLastRow()
+      var twResult  = syncBatchHandler_(ss, [{
+        hcId:           'TEST-9999',
+        openDate:       '2026-01-01',
+        employmentType: 'Monthly',
+        requestType:    'New HC',
+        position:       'TEST POSITION',
+        jg:             'JG5',
+        department:     'TEST DEPT',
+        businessUnit:   'TEST BU',
+        assignedToName: 'Tester',
+        status:         'Open',
+        candidateName:  '',
+        offeringDate:   '',
+        startDate:      '',
+        contractEndDate:'',
+      }])
+      var twNewLast = twSheet.getLastRow()
+      return responseJson_({
+        testWrite: 'done',
+        sheetName: JOB_OPENINGS_SHEET,
+        rowsBefore: twLastRow,
+        rowsAfter: twNewLast,
+        syncResult: JSON.parse(twResult.getContent()),
+      })
+    } catch (twErr) {
+      return responseJson_({ error: twErr.message, stack: twErr.stack })
+    }
+  }
+
+  // ── GET SHEET DATA: ส่ง rows กลับเป็น JSON ให้ frontend ทำ Firestore batch write เอง
+  // เร็วกว่า syncFromSheets แบบเดิม (ที่เรียก Firestore REST API ทีละ row) มาก
+  // เรียกด้วย ?action=getSheetData&secret=XXX
+  if (e.parameter.action === 'getSheetData') {
+    if (!isValidSecret_(e)) return responseJson_({ error: 'Unauthorized' })
+    try {
+      var gdSheet = ss.getSheetByName(JOB_OPENINGS_SHEET)
+      if (!gdSheet) return responseJson_({ error: 'Sheet not found: ' + JOB_OPENINGS_SHEET })
+
+      var gdLastRow = gdSheet.getLastRow()
+      if (gdLastRow < 2) return responseJson_({ success: true, rows: [] })
+
+      var gdCols   = Math.max(COL_STATUS, COL_PIC, COL_CANDIDATE, COL_START_DATE)
+      var gdData   = gdSheet.getRange(2, 1, gdLastRow - 1, gdCols).getValues()
+      var gdMonths = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+
+      var gdRows = []
+      gdData.forEach(function(row) {
+        var hcId = (row[COL_HCID - 1] || '').toString().trim()
+        if (!hcId) return
+
+        var startRaw = row[COL_START_DATE - 1]
+        var startStr = ''
+        if (startRaw instanceof Date && !isNaN(startRaw)) {
+          startStr = startRaw.getDate() + '-' + gdMonths[startRaw.getMonth()] + '-' + startRaw.getFullYear()
+        } else if (startRaw) {
+          startStr = startRaw.toString().trim()
+        }
+
+        gdRows.push({
+          hcId:      hcId,
+          status:    (row[COL_STATUS    - 1] || '').toString().trim(),
+          pic:       (row[COL_PIC       - 1] || '').toString().trim(),
+          candidate: (row[COL_CANDIDATE - 1] || '').toString().trim(),
+          startDate: startStr,
+        })
+      })
+
+      return responseJson_({ success: true, rows: gdRows })
+    } catch (gdErr) {
+      return responseJson_({ success: false, error: gdErr.message })
     }
   }
 
@@ -531,10 +671,13 @@ function doPost(e) {
     var data = JSON.parse(e.postData.contents)
     var ss   = SpreadsheetApp.getActiveSpreadsheet()
 
-    // ─── NEW: syncBatch ─────────────────────────────────────
-    // รับ array ของ rows และ upsert ลงใน sheet "Job Openings YYYY"
+    // ─── syncBatch ──────────────────────────────────────────
     if (data.action === 'syncBatch') {
-      return syncBatchHandler_(ss, data.rows || [])
+      try {
+        return syncBatchHandler_(ss, data.rows || [])
+      } catch (sbErr) {
+        return responseJson_({ success: false, error: sbErr.message, rows: (data.rows || []).length })
+      }
     }
 
     // ─── New HC / Replacement request ────────────────────────
@@ -597,6 +740,36 @@ function doPost(e) {
 }
 
 // =====================================
+// STATUS MAPPING HELPER
+// แปลง internal app status → Sheets display status (ค่าที่อยู่ใน data validation dropdown)
+// ────────────────────────────────────────────────────────────────────────────
+// Sheets dropdown อนุญาต: Active Sourcing, Pending Offer, Pending Onboard,
+//   Onboard, Internal Transfer, Job Cancelled, Confidential, To be confirmed, On hold
+// =====================================
+function toSheetsStatus_(appStatus) {
+  var map = {
+    'Open':           'To be confirmed',   // ยังไม่เริ่ม → รอยืนยัน
+    'Recruiting':     'Active Sourcing',
+    'Interviewing':   'Active Sourcing',   // Interviewing ไม่มีใน dropdown
+    'Offering':       'Pending Offer',
+    'Onboarding':     'Pending Onboard',
+    'Closed':         'Onboard',
+    'Rejected':       'Job Cancelled',     // Turndown ไม่มีใน dropdown
+    'Cancelled':      'Job Cancelled',
+    // pass-through (ค่าที่เขียนใน Sheets อยู่แล้ว)
+    'Active Sourcing':  'Active Sourcing',
+    'Pending Offer':    'Pending Offer',
+    'Pending Onboard':  'Pending Onboard',
+    'To be confirmed':  'To be confirmed',
+    'Job Cancelled':    'Job Cancelled',
+    'On hold':          'On hold',
+    'Internal Transfer':'Internal Transfer',
+    'Confidential':     'Confidential',
+  }
+  return map[appStatus] || appStatus
+}
+
+// =====================================
 // SYNC BATCH HANDLER
 // upsert rows ลง sheet "Job Openings YYYY" โดยใช้ HCID เป็น key
 // - ดึงปีจาก HCID (REQ-2025-001 → "Job Openings 2025")
@@ -609,8 +782,8 @@ function syncBatchHandler_(ss, rows) {
   var HEADERS = [
     'Open Jobs','Emp. Type','Job Type','HCID','Position','Rank',
     'Department','Business Unit','PIC','Status','Offered Candidate',
-    'Offering Date','Offer Month','Offer Year','SLA Offer (Days)',
-    'Onboard Date','Contract End Date'
+    'Offering Date','Offer Month','Offer Year','SLA Offer (Y.M.D)',
+    'Onboard Date','Contract End Date','Over SLA','Weeks Offer'
   ]
   var HCID_COL = 4  // column D (1-based)
 
@@ -632,9 +805,26 @@ function syncBatchHandler_(ss, rows) {
         .setBackground('#008065')
         .setFontColor('#ffffff')
       sheet.setFrozenRows(1)
+    } else {
+      // ── ตรวจว่า row 1 เป็น header แล้วหรือยัง ──────────────────────────
+      // ถ้า A1 ไม่ใช่ 'Open Jobs' → sheet ยังไม่มี header row (ข้อมูลเริ่มตั้งแต่ row 1)
+      // แก้โดย insert row ว่างที่ row 1 แล้วใส่ header + formatting
+      var firstCell = sheet.getRange(1, 1).getValue().toString().trim()
+      if (firstCell !== 'Open Jobs') {
+        sheet.insertRowBefore(1)
+        // ขยาย column ก่อนถ้า sheet มีน้อยกว่า HEADERS.length
+        var hCurCols = sheet.getMaxColumns()
+        if (hCurCols < HEADERS.length) sheet.insertColumnsAfter(hCurCols, HEADERS.length - hCurCols)
+        sheet.getRange(1, 1, 1, HEADERS.length)
+          .setValues([HEADERS])
+          .setFontWeight('bold')
+          .setBackground('#008065')
+          .setFontColor('#ffffff')
+        sheet.setFrozenRows(1)
+      }
     }
 
-    // สร้าง rowMap: HCID → rowNumber
+    // สร้าง rowMap: HCID → rowNumber (เริ่มจาก row 2 เสมอ เพราะ row 1 = header)
     var rowMap = {}
     var lastRow = sheet.getLastRow()
     if (lastRow > 1) {
@@ -686,28 +876,65 @@ function syncBatchHandler_(ss, rows) {
       r.department     || '',
       r.businessUnit   || '',
       r.assignedToName || '',
-      r.status         || '',
+      toSheetsStatus_(r.status || ''),
       r.candidateName  || '',
       offeringDateFmt,
       offerMonth,
       offerYear,
-      '',                        // SLA Offer (Days) — computed separately
+      '',                        // SLA Offer (Y.M.D) — computed separately
       r.startDate      || '',
       r.contractEndDate|| '',
+      '',                        // Over SLA — computed separately
+      '',                        // Weeks Offer — computed separately
     ]
 
     var hcIdKey     = r.hcId.toString().trim()
     var existingRow = ctx.rowMap[hcIdKey]
 
     if (existingRow) {
-      // อัพเดต row ที่มีอยู่ (ไม่เขียนทับข้อมูลเดิมที่ไม่ส่งมา)
-      ctx.sheet.getRange(existingRow, 1, 1, rowData.length).setValues([rowData])
+      // อัพเดต row ที่มีอยู่ทันที (scattered → ต้องทำทีละ row)
+      var updRange = ctx.sheet.getRange(existingRow, 1, 1, rowData.length)
+      updRange.setDataValidation(null)
+      updRange.setValues([rowData])
+      synced++
     } else {
-      // เพิ่ม row ใหม่ต่อท้าย
-      ctx.sheet.appendRow(rowData)
-      ctx.rowMap[hcIdKey] = ctx.sheet.getLastRow()
+      // เก็บ row ใหม่ไว้ก่อน → จะ batch write ทีเดียวตอนท้าย
+      if (!ctx.newRows) ctx.newRows = []
+      ctx.newRows.push({ hcIdKey: hcIdKey, rowData: rowData })
     }
-    synced++
+  })
+
+  // ── Batch write แถวใหม่ทั้งหมดในแต่ละ sheet ครั้งเดียว ──────────────────
+  // ใช้ setValues([...]) แทน appendRow() ในลูป → เร็วกว่า 10-20x
+  Object.keys(sheetCache).forEach(function(sheetName) {
+    var ctx = sheetCache[sheetName]
+    if (!ctx.newRows || ctx.newRows.length === 0) return
+
+    var startRow = ctx.sheet.getLastRow() + 1
+    var allRowData = ctx.newRows.map(function(nr) { return nr.rowData })
+
+    // ขยาย column ถ้า sheet มีน้อยกว่า HEADERS.length
+    var curCols = ctx.sheet.getMaxColumns()
+    if (curCols < HEADERS.length) {
+      ctx.sheet.insertColumnsAfter(curCols, HEADERS.length - curCols)
+    }
+    // ขยาย row ถ้า sheet มีน้อยกว่า startRow + rows ที่จะเพิ่ม
+    var curRows = ctx.sheet.getMaxRows()
+    var neededRows = startRow + allRowData.length - 1
+    if (curRows < neededRows) {
+      ctx.sheet.insertRowsAfter(curRows, neededRows - curRows)
+    }
+
+    var range = ctx.sheet.getRange(startRow, 1, allRowData.length, HEADERS.length)
+    // ปิด data validation ชั่วคราวเพื่อป้องกัน "violates validation rules" error
+    range.setDataValidation(null)
+    range.setValues(allRowData)
+
+    // อัพเดต rowMap ด้วย
+    ctx.newRows.forEach(function(nr, i) {
+      ctx.rowMap[nr.hcIdKey] = startRow + i
+    })
+    synced += ctx.newRows.length
   })
 
   var sheets = Object.keys(sheetCache).join(', ')

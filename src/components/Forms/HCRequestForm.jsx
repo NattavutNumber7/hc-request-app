@@ -40,19 +40,20 @@ import { DIVISIONS, getDepartments, getSections, getBusinessUnits, getDivisionBy
 // ใช้เป็น template สำหรับ reset หลัง submit สำเร็จ
 // (division/department/section จะถูก preserve แยกต่างหาก)
 const INITIAL_FORM = {
-  requestType: 'Replacement',  // ประเภทคำขอ: 'Replacement' หรือ 'New HC'
-  division: '',                 // สายงานหลัก (เลือกจาก DIVISIONS)
-  department: '',               // แผนก (cascade จาก division)
-  section: '',                  // หน่วยงานย่อย (cascade จาก department)
-  businessUnit: '',             // Business Unit (cascade จาก section)
-  position: '',                 // ตำแหน่งงาน (combobox + free text)
-  orgTrack: '',                 // Location track: 'HQ' หรือ 'OPERATION'
-  jg: '',                       // Job Grade (ขึ้นกับ orgTrack)
-  headcount: 1,                 // จำนวน HC ที่ต้องการ (ใช้เฉพาะ New HC)
-  requirements: '',             // คุณสมบัติที่ต้องการ (optional free text)
-  reason: '',                   // เหตุผลในการขอ (required)
-  targetStartDate: '',          // New HC: วันที่ต้องการเริ่มงาน | Replacement: Last Working Day
-  replacementFor: '',           // ชื่อพนักงานที่ต้องการทดแทน (เฉพาะ Replacement)
+  requestType:    'Replacement', // ประเภทคำขอ: 'Replacement' หรือ 'New HC'
+  employmentType: 'Monthly',     // ประเภทการจ้าง: Monthly | Daily | Contract | Intern
+  division: '',                  // สายงานหลัก (เลือกจาก DIVISIONS)
+  department: '',                // แผนก (cascade จาก division)
+  section: '',                   // หน่วยงานย่อย (cascade จาก department)
+  businessUnit: '',              // Business Unit (cascade จาก section)
+  position: '',                  // ตำแหน่งงาน (combobox + free text)
+  orgTrack: '',                  // Location track: 'HQ' หรือ 'OPERATION'
+  jg: '',                        // Job Grade (ขึ้นกับ orgTrack)
+  headcount: 1,                  // จำนวน HC ที่ต้องการ (ใช้เฉพาะ New HC)
+  requirements: '',              // คุณสมบัติที่ต้องการ (optional free text)
+  reason: '',                    // เหตุผลในการขอ (required)
+  targetStartDate: '',           // New HC: วันที่ต้องการเริ่มงาน | Replacement: Last Working Day
+  replacementFor: '',            // ชื่อพนักงานที่ต้องการทดแทน (เฉพาะ Replacement)
 }
 
 // ─── รายชื่อ Department fallback ──────────────────────────────────────────────
@@ -662,6 +663,26 @@ export default function HCRequestForm({ user, role, maintenanceMode = false }) {
                     className="w-4 h-4 accent-emerald-600 dark:accent-emerald-500 cursor-pointer"
                   />
                   <span className={`text-sm font-bold transition-colors ${form.requestType === type ? 'text-gray-900 dark:text-white' : 'text-gray-400 group-hover:text-gray-600 dark:group-hover:text-slate-300'}`}>{type}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+
+          {/* ── Emp. Type ──────────────────────────────────────────────────── */}
+          <div>
+            <label className="block text-[10px] uppercase font-black text-gray-500 dark:text-slate-500 tracking-widest ml-1 mb-2">Emp. Type *</label>
+            <div className="flex gap-5">
+              {['Monthly', 'Daily', 'Contract', 'Intern'].map((t) => (
+                <label key={t} className="flex items-center gap-2 cursor-pointer group">
+                  <input
+                    type="radio"
+                    name="employmentType"
+                    value={t}
+                    checked={form.employmentType === t}
+                    onChange={handleChange}
+                    className="w-4 h-4 accent-emerald-600 dark:accent-emerald-500 cursor-pointer"
+                  />
+                  <span className={`text-sm font-bold transition-colors ${form.employmentType === t ? 'text-gray-900 dark:text-white' : 'text-gray-400 group-hover:text-gray-600 dark:group-hover:text-slate-300'}`}>{t}</span>
                 </label>
               ))}
             </div>
