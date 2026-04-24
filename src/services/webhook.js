@@ -256,6 +256,20 @@ export async function syncBatchToSheets(requests) {
 }
 
 /**
+ * ดึง hc_requests ทั้งหมดจาก Firestore แล้ว push ไป Google Sheets
+ * ใช้เมื่อต้องการ sync Firestore → Sheets แบบ on-demand (เช่น กรณีเปิดเคสใหม่แล้วไม่ไป Sheets)
+ */
+export async function syncAllToSheets(onProgress) {
+  const { collection, getDocs } = await import('firebase/firestore')
+  const { db } = await import('./firebase')
+  const snap = await getDocs(collection(db, 'hc_requests'))
+  const docs = snap.docs.map(d => ({ id: d.id, ...d.data() }))
+  if (onProgress) onProgress({ loaded: docs.length, total: docs.length })
+  await syncBatchToSheets(docs)
+  return { total: docs.length }
+}
+
+/**
  * ส่งข้อมูล HC Request ใหม่ไปยัง Google Apps Script Webhook
  * Sends a new HC Request's data to the Google Apps Script Webhook (doPost handler).
  *

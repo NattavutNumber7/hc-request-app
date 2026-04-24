@@ -485,9 +485,7 @@ export default function HCRequestForm({ user, role, maintenanceMode = false }) {
       return seq
     })
 
-    // รูปแบบ REQ-2026-0001 ... REQ-2026-9999 (4 หลัก เพื่อรักษา lexicographic order ถึง 9999)
-    const padded = String(newSeq).padStart(4, '0')
-    return `REQ-${currentYear}-${padded}`
+    return `REQ-${currentYear}-${newSeq}`
   }
 
   // ─── handleSubmit ──────────────────────────────────────────────────────────

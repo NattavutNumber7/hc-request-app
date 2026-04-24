@@ -18,15 +18,17 @@
  * ─────────────────────────────────────────────────────────────────────────────
  */
 import { useState } from 'react'
-import { RefreshCw, CheckCircle2, AlertCircle } from 'lucide-react'
+import { RefreshCw, CheckCircle2, AlertCircle, Upload } from 'lucide-react'
 import Layout from '../components/Shared/Layout'
 import RequestTable from '../components/Dashboard/RequestTable'
-import { syncFromSheets } from '../services/webhook'
+import { syncFromSheets, syncAllToSheets } from '../services/webhook'
 
 export default function AllRequestsPage({ user, role, department, isDarkMode, toggleDarkMode }) {
   // 'idle' | 'running' | 'done' | 'error'
-  const [syncState,  setSyncState]  = useState('idle')
-  const [syncResult, setSyncResult] = useState(null)
+  const [syncState,    setSyncState]    = useState('idle')
+  const [syncResult,   setSyncResult]   = useState(null)
+  const [pushState,    setPushState]    = useState('idle')
+  const [pushResult,   setPushResult]   = useState(null)
 
   async function handleSyncSheets() {
     if (syncState === 'running') return
@@ -45,8 +47,40 @@ export default function AllRequestsPage({ user, role, department, isDarkMode, to
       setSyncResult(err.message)
       setSyncState('error')
     }
-    // reset กลับ idle หลัง 5 วินาที
     setTimeout(() => { setSyncState('idle'); setSyncResult(null) }, 5000)
+  }
+
+  async function handlePushToSheets() {
+    if (pushState === 'running') return
+    setPushState('running')
+    setPushResult(null)
+    try {
+      const res = await syncAllToSheets()
+      setPushResult(`Pushed ${res.total} rows`)
+      setPushState('done')
+    } catch (err) {
+      setPushResult(err.message)
+      setPushState('error')
+    }
+    setTimeout(() => { setPushState('idle'); setPushResult(null) }, 5000)
+  }
+
+  function SyncBtn({ state, result, onClick, icon: Icon, label, title }) {
+    const busy = state === 'running'
+    const color = state === 'done' ? 'emerald' : state === 'error' ? 'red' : 'gray'
+    return (
+      <button onClick={onClick} disabled={busy} title={title}
+        className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-black border transition-all shrink-0
+          ${state === 'done'  ? 'bg-emerald-50 dark:bg-emerald-500/10 border-emerald-200 dark:border-emerald-500/20 text-emerald-700 dark:text-emerald-400'
+          : state === 'error' ? 'bg-red-50 dark:bg-red-500/10 border-red-200 dark:border-red-500/20 text-red-600 dark:text-red-400'
+          : 'bg-white dark:bg-slate-900 border-gray-200 dark:border-slate-700 text-gray-600 dark:text-slate-300 hover:border-emerald-300 dark:hover:border-emerald-500/40 hover:text-emerald-600 dark:hover:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-500/5 shadow-sm'}`}>
+        {busy ? <RefreshCw size={13} className="animate-spin" />
+          : state === 'done'  ? <CheckCircle2 size={13} />
+          : state === 'error' ? <AlertCircle size={13} />
+          : <Icon size={13} />}
+        <span>{busy ? 'กำลัง Sync...' : state !== 'idle' ? (result || label) : label}</span>
+      </button>
+    )
   }
 
   return (
@@ -59,38 +93,16 @@ export default function AllRequestsPage({ user, role, department, isDarkMode, to
             <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">รายการคำขออัตรากำลังทั้งหมดในระบบ</p>
           </div>
 
-          {/* Sync from Sheets button — visible to both ta and admin */}
-          <button
-            onClick={handleSyncSheets}
-            disabled={syncState === 'running'}
-            className={`
-              flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-black
-              border transition-all shrink-0
-              ${syncState === 'done'
-                ? 'bg-emerald-50 dark:bg-emerald-500/10 border-emerald-200 dark:border-emerald-500/20 text-emerald-700 dark:text-emerald-400'
-                : syncState === 'error'
-                  ? 'bg-red-50 dark:bg-red-500/10 border-red-200 dark:border-red-500/20 text-red-600 dark:text-red-400'
-                  : 'bg-white dark:bg-slate-900 border-gray-200 dark:border-slate-700 text-gray-600 dark:text-slate-300 hover:border-emerald-300 dark:hover:border-emerald-500/40 hover:text-emerald-600 dark:hover:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-500/5 shadow-sm'
-              }
-            `}
-            title="Sync ข้อมูล Status/PIC จาก Google Sheets กลับมา Firestore"
-          >
-            {syncState === 'running' ? (
-              <RefreshCw size={13} className="animate-spin" />
-            ) : syncState === 'done' ? (
-              <CheckCircle2 size={13} />
-            ) : syncState === 'error' ? (
-              <AlertCircle size={13} />
-            ) : (
-              <RefreshCw size={13} />
+          <div className="flex items-center gap-2 shrink-0">
+            <SyncBtn state={syncState} result={syncResult} onClick={handleSyncSheets}
+              icon={RefreshCw} label="Sheets → App"
+              title="ดึง Status/PIC จาก Google Sheets → Firestore" />
+            {role === 'admin' && (
+              <SyncBtn state={pushState} result={pushResult} onClick={handlePushToSheets}
+                icon={Upload} label="App → Sheets"
+                title="Push ข้อมูลทั้งหมดจาก Firestore → Google Sheets" />
             )}
-            <span>
-              {syncState === 'running' ? 'กำลัง Sync...'
-                : syncState === 'done'    ? syncResult
-                : syncState === 'error'   ? (syncResult || 'Error')
-                : 'Sync Sheets'}
-            </span>
-          </button>
+          </div>
         </div>
 
         {/* showFilters=true เปิด filter bar ให้กรองตาม status, แผนก, ช่วงวันที่ ฯลฯ */}
