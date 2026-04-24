@@ -427,6 +427,24 @@ export async function syncFromSheets() {
   }
 }
 
+/**
+ * ดึง max HCID seq จาก Google Sheets (สำหรับใช้สร้าง HCID ถัดไป)
+ * Returns the highest seq number for the current year found in Sheets, or 0 if unavailable.
+ */
+export async function getMaxHCIDFromSheets() {
+  if (!DATA_URL) return 0
+  try {
+    const params = new URLSearchParams({ action: 'maxHCID' })
+    if (GAS_SECRET) params.set('secret', GAS_SECRET)
+    const res  = await fetch(`${DATA_URL}?${params.toString()}`)
+    const json = await res.json()
+    if (json.success) return json.maxSeq || 0
+  } catch (err) {
+    console.error('[getMaxHCIDFromSheets] error:', err)
+  }
+  return 0
+}
+
 export async function sendToWebhook(data) {
   if (!WEBHOOK_URL) {
     console.warn('GAS Webhook URL not configured')

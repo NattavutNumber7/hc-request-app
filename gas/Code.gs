@@ -567,6 +567,36 @@ function doGet(e) {
     }
   }
 
+  // ── MAX HCID: ค้นหา seq สูงสุดของปีนี้ใน Sheet — ใช้สร้าง HCID ถัดไป ──────
+  // เรียกด้วย ?action=maxHCID&secret=XXX
+  if (e.parameter.action === 'maxHCID') {
+    if (!isValidSecret_(e)) return responseJson_({ error: 'Unauthorized' })
+    try {
+      var mYear   = new Date().getFullYear()
+      var mPrefix = 'REQ-' + mYear + '-'
+      var mSheet  = ss ? ss.getSheetByName(JOB_OPENINGS_SHEET) : null
+      var mMaxSeq = 0
+      if (mSheet && mSheet.getLastRow() > 1) {
+        var mVals = mSheet.getRange(2, COL_HCID, mSheet.getLastRow() - 1, 1).getValues()
+        mVals.forEach(function(row) {
+          var v = (row[0] || '').toString().trim()
+          if (v.indexOf(mPrefix) === 0) {
+            var seq = parseInt(v.split('-')[2]) || 0
+            if (seq > mMaxSeq) mMaxSeq = seq
+          }
+        })
+      }
+      return responseJson_({
+        success:  true,
+        year:     mYear,
+        maxSeq:   mMaxSeq,
+        nextHCID: mPrefix + (mMaxSeq + 1),
+      })
+    } catch (mErr) {
+      return responseJson_({ success: false, error: mErr.message })
+    }
+  }
+
   // ── LAST SYNC LOG: ดูผลล่าสุดของ syncBatch POST call ──────────────────────
   // เรียกได้หลังกด Sync ทันที: ?action=lastSyncLog&secret=XXX
   if (e.parameter.action === 'lastSyncLog') {
@@ -947,9 +977,9 @@ function syncBatchHandler_(ss, rows) {
 
     if (existingRow) {
       // อัพเดต row ที่มีอยู่ทันที (scattered → ต้องทำทีละ row)
-      var updRange = ctx.sheet.getRange(existingRow, 1, 1, rowData.length)
-      updRange.setDataValidation(null)
-      updRange.setValues([rowData])
+      // ไม่ต้อง setDataValidation(null) — GAS scripts เขียนค่าได้โดยไม่สนใจ validation rules
+      // การล้าง validation จะทำให้ Chip display style หายไป
+      ctx.sheet.getRange(existingRow, 1, 1, rowData.length).setValues([rowData])
       synced++
     } else {
       // เก็บ row ใหม่ไว้ก่อน → จะ batch write ทีเดียวตอนท้าย
@@ -990,9 +1020,19 @@ function syncBatchHandler_(ss, rows) {
     }
 
     var range = ctx.sheet.getRange(startRow, 1, allRowData.length, HEADERS.length)
-    // ปิด data validation ชั่วคราวเพื่อป้องกัน "violates validation rules" error
-    range.setDataValidation(null)
+    // ไม่ต้อง setDataValidation(null) — GAS เขียนค่าได้โดยไม่สนใจ validation rules
     range.setValues(allRowData)
+
+    // คัดลอก format + Chip-style validation จาก row 2 ไปยัง row ใหม่
+    // เพื่อให้ row ใหม่ได้ Chip display style เหมือนกับ row ที่มีอยู่แล้ว
+    var templateLastRow = ctx.sheet.getLastRow()
+    if (templateLastRow >= 2) {
+      var templateRange = ctx.sheet.getRange(2, 1, 1, HEADERS.length)
+      templateRange.copyTo(range, SpreadsheetApp.CopyPasteType.PASTE_FORMAT, false)
+      templateRange.copyTo(range, SpreadsheetApp.CopyPasteType.PASTE_DATA_VALIDATION, false)
+      // หลัง copyTo ให้ setValues อีกครั้งเพราะ PASTE_FORMAT อาจล้างค่า
+      range.setValues(allRowData)
+    }
 
     // อัพเดต rowMap ด้วย
     ctx.newRows.forEach(function(nr, i) {
@@ -1001,16 +1041,11 @@ function syncBatchHandler_(ss, rows) {
     synced += ctx.newRows.length
   })
 
-  // ── Restore data validation dropdowns หลัง write ────────────────────────────
-  Object.keys(sheetCache).forEach(function(sheetName) {
-    applySheetValidation_(sheetCache[sheetName].sheet)
-  })
-
   var sheets = Object.keys(sheetCache).join(', ')
   return responseJson_({ success: true, synced: synced, sheets: sheets })
 }
 
-// ── applySheetValidation_: ตั้ง dropdown validation บน Emp. Type / Job Type / Status ──
+// ── applySheetValidation_: ตั้ง dropdown validation บน Emp. Type / Job Type / Rank / Dept / BU / PIC / Status ──
 // เรียกหลัง batch write เพื่อให้ Sheets มี dropdown picker เหมือน Sheets ต้นฉบับ
 function applySheetValidation_(sheet) {
   var lastRow = sheet.getLastRow()
@@ -1022,17 +1057,62 @@ function applySheetValidation_(sheet) {
   sheet.getRange(2, COL_EMP_TYPE, dataRows, 1).setDataValidation(
     SpreadsheetApp.newDataValidation()
       .requireValueInList(['Monthly', 'Daily', 'Contract', 'Intern'], true)
-      .setAllowInvalid(false)
-      .build()
+      .setAllowInvalid(false).build()
   )
 
   // ── Job Type (col C) ───────────────────────────────────────────────────────
   sheet.getRange(2, COL_JOB_TYPE, dataRows, 1).setDataValidation(
     SpreadsheetApp.newDataValidation()
       .requireValueInList(['New HC', 'Replace'], true)
-      .setAllowInvalid(false)
-      .build()
+      .setAllowInvalid(false).build()
   )
+
+  // ── Rank (col F) — static JG label list ────────────────────────────────────
+  var rankList = Object.keys(JG_LABELS).map(function(k) { return JG_LABELS[k] })
+  sheet.getRange(2, COL_RANK, dataRows, 1).setDataValidation(
+    SpreadsheetApp.newDataValidation()
+      .requireValueInList(rankList, true)
+      .setAllowInvalid(true).build()  // allowInvalid=true เพราะข้อมูลเก่าอาจมี format ต่างกัน
+  )
+
+  // ── Department (col G) — dynamic: อ่านค่า unique จาก column นั้นเลย ─────────
+  var deptRaw = sheet.getRange(2, COL_DEPT, dataRows, 1).getValues()
+  var deptSet = {}
+  deptRaw.forEach(function(r) { var v = (r[0] || '').toString().trim(); if (v) deptSet[v] = true })
+  var deptList = Object.keys(deptSet).sort()
+  if (deptList.length > 0) {
+    sheet.getRange(2, COL_DEPT, dataRows, 1).setDataValidation(
+      SpreadsheetApp.newDataValidation()
+        .requireValueInList(deptList.slice(0, 500), true)
+        .setAllowInvalid(true).build()
+    )
+  }
+
+  // ── Business Unit (col H) — dynamic ────────────────────────────────────────
+  var buRaw = sheet.getRange(2, COL_BU, dataRows, 1).getValues()
+  var buSet = {}
+  buRaw.forEach(function(r) { var v = (r[0] || '').toString().trim(); if (v) buSet[v] = true })
+  var buList = Object.keys(buSet).sort()
+  if (buList.length > 0) {
+    sheet.getRange(2, COL_BU, dataRows, 1).setDataValidation(
+      SpreadsheetApp.newDataValidation()
+        .requireValueInList(buList.slice(0, 500), true)
+        .setAllowInvalid(true).build()
+    )
+  }
+
+  // ── PIC (col I) — dynamic ──────────────────────────────────────────────────
+  var picRaw = sheet.getRange(2, COL_PIC, dataRows, 1).getValues()
+  var picSet = {}
+  picRaw.forEach(function(r) { var v = (r[0] || '').toString().trim(); if (v) picSet[v] = true })
+  var picList = Object.keys(picSet).sort()
+  if (picList.length > 0) {
+    sheet.getRange(2, COL_PIC, dataRows, 1).setDataValidation(
+      SpreadsheetApp.newDataValidation()
+        .requireValueInList(picList.slice(0, 500), true)
+        .setAllowInvalid(true).build()
+    )
+  }
 
   // ── Status (col J) ─────────────────────────────────────────────────────────
   sheet.getRange(2, COL_STATUS, dataRows, 1).setDataValidation(
@@ -1049,8 +1129,7 @@ function applySheetValidation_(sheet) {
         'Internal Transfer',
         'Confidential',
       ], true)
-      .setAllowInvalid(false)
-      .build()
+      .setAllowInvalid(false).build()
   )
 }
 
