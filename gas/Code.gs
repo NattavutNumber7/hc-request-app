@@ -567,6 +567,14 @@ function doGet(e) {
     }
   }
 
+  // ── LAST SYNC LOG: ดูผลล่าสุดของ syncBatch POST call ──────────────────────
+  // เรียกได้หลังกด Sync ทันที: ?action=lastSyncLog&secret=XXX
+  if (e.parameter.action === 'lastSyncLog') {
+    if (!isValidSecret_(e)) return responseJson_({ error: 'Unauthorized' })
+    var raw = PropertiesService.getScriptProperties().getProperty('_lastSyncLog')
+    return responseJson_({ log: raw ? JSON.parse(raw) : null, note: 'ผล POST syncBatch ล่าสุด — null = ยังไม่เคยถูกเรียก' })
+  }
+
   // ── TEST WRITE: เขียน 1 row ทดสอบลง Sheet แล้วคืน JSON — ใช้ debug ว่า GAS เขียน Sheet ได้จริงมั้ย ──
   // เรียกด้วย ?action=testWrite&secret=XXX  (เปิด URL ใน browser ได้เลย — GET response อ่านได้)
   if (e.parameter.action === 'testWrite') {
@@ -701,9 +709,15 @@ function doPost(e) {
 
     // ─── syncBatch ──────────────────────────────────────────
     if (data.action === 'syncBatch') {
+      var syncLog = { time: new Date().toISOString(), rowsReceived: (data.rows || []).length, result: null, error: null }
       try {
-        return syncBatchHandler_(ss, data.rows || [])
+        var syncResult = syncBatchHandler_(ss, data.rows || [])
+        syncLog.result = JSON.parse(syncResult.getContent())
+        PropertiesService.getScriptProperties().setProperty('_lastSyncLog', JSON.stringify(syncLog))
+        return syncResult
       } catch (sbErr) {
+        syncLog.error = sbErr.message
+        PropertiesService.getScriptProperties().setProperty('_lastSyncLog', JSON.stringify(syncLog))
         return responseJson_({ success: false, error: sbErr.message, rows: (data.rows || []).length })
       }
     }

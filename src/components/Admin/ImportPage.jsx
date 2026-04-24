@@ -24,7 +24,7 @@
  */
 
 import { useState, useRef, useEffect } from 'react'
-import { doc, collection, writeBatch, getDocs, query, where, limit } from 'firebase/firestore'
+import { doc, collection, writeBatch, getDocs, query, where, limit, getDoc, setDoc } from 'firebase/firestore'
 import { db } from '../../services/firebase'
 import { syncBatchToSheets } from '../../services/webhook'
 import { FolderOpen, Plus, Settings2, RefreshCw, Link, Loader2 } from 'lucide-react'
@@ -572,6 +572,26 @@ export default function ImportPage({ user, role, isDarkMode, toggleDarkMode }) {
     // syncBatchToSheets() ส่ง rows ทั้งหมดไปยัง Google Apps Script webhook
     // เพื่ออัพเดต Google Sheets tracker ให้ตรงกับ Firestore
     if (errs.length === 0 && rowsWithIds.length > 0) {
+      // อัพเดต HCID counter ให้สูงกว่า max ที่ import มา
+      // ป้องกัน generateHCID() ใน form submission generate HCID ซ้ำกับ imported rows
+      const currentYear = new Date().getFullYear()
+      let maxSeq = 0
+      rowsWithIds.forEach(r => {
+        const parts = (r.hcId || '').split('-')
+        if (parts.length === 3 && parts[1] === String(currentYear)) {
+          const seq = parseInt(parts[2]) || 0
+          if (seq > maxSeq) maxSeq = seq
+        }
+      })
+      if (maxSeq > 0) {
+        const counterRef = doc(db, 'meta', 'hcid_counter')
+        const counterSnap = await getDoc(counterRef)
+        const currentSeq = counterSnap.exists() ? (counterSnap.data().seq || 0) : 0
+        if (maxSeq > currentSeq) {
+          await setDoc(counterRef, { year: currentYear, seq: maxSeq })
+        }
+      }
+
       setImportedRows(rowsWithIds) // เก็บไว้สำหรับ re-sync ภายหลัง
       setSyncing(true)
       await syncBatchToSheets(rowsWithIds)
