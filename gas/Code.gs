@@ -991,8 +991,57 @@ function syncBatchHandler_(ss, rows) {
     synced += ctx.newRows.length
   })
 
+  // ── Restore data validation dropdowns หลัง write ────────────────────────────
+  Object.keys(sheetCache).forEach(function(sheetName) {
+    applySheetValidation_(sheetCache[sheetName].sheet)
+  })
+
   var sheets = Object.keys(sheetCache).join(', ')
   return responseJson_({ success: true, synced: synced, sheets: sheets })
+}
+
+// ── applySheetValidation_: ตั้ง dropdown validation บน Emp. Type / Job Type / Status ──
+// เรียกหลัง batch write เพื่อให้ Sheets มี dropdown picker เหมือน Sheets ต้นฉบับ
+function applySheetValidation_(sheet) {
+  var lastRow = sheet.getLastRow()
+  if (lastRow < 2) return  // ไม่มี data rows
+
+  var dataRows = lastRow - 1  // ไม่รวม header
+
+  // ── Emp. Type (col B) ──────────────────────────────────────────────────────
+  sheet.getRange(2, COL_EMP_TYPE, dataRows, 1).setDataValidation(
+    SpreadsheetApp.newDataValidation()
+      .requireValueInList(['Monthly', 'Daily', 'Contract', 'Intern'], true)
+      .setAllowInvalid(false)
+      .build()
+  )
+
+  // ── Job Type (col C) ───────────────────────────────────────────────────────
+  sheet.getRange(2, COL_JOB_TYPE, dataRows, 1).setDataValidation(
+    SpreadsheetApp.newDataValidation()
+      .requireValueInList(['New HC', 'Replace'], true)
+      .setAllowInvalid(false)
+      .build()
+  )
+
+  // ── Status (col J) ─────────────────────────────────────────────────────────
+  sheet.getRange(2, COL_STATUS, dataRows, 1).setDataValidation(
+    SpreadsheetApp.newDataValidation()
+      .requireValueInList([
+        'To be confirmed',
+        'Active Sourcing',
+        'Pending Offer',
+        'Pending Onboard',
+        'Onboard',
+        'Job Cancelled',
+        'Turndown',
+        'On hold',
+        'Internal Transfer',
+        'Confidential',
+      ], true)
+      .setAllowInvalid(false)
+      .build()
+  )
 }
 
 // ── Helper ──────────────────────────────────────────────────────
