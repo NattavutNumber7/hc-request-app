@@ -511,13 +511,16 @@ export default function ImportPage({ user, role, isDarkMode, toggleDarkMode }) {
     let count = 0
     const errs = []
     const BATCH_SIZE = 400 // Firestore batch limit = 500 operations, ใช้ 400 เพื่อ safety margin
+    const rowsWithIds = [] // เก็บ rows พร้อม Firestore ID สำหรับ sync ไป Sheets
 
     for (let i = 0; i < rows.length; i += BATCH_SIZE) {
       const chunk = rows.slice(i, i + BATCH_SIZE) // ตัด rows เป็น chunk
       const batch = writeBatch(db)
+      const chunkRefs = [] // เก็บ ref แต่ละ row เพื่อดึง ID หลัง commit
 
       chunk.forEach(r => {
         const ref = doc(collection(db, 'hc_requests')) // auto-generate document ID ใหม่
+        chunkRefs.push({ r, ref })
         batch.set(ref, {
           position:        r.position,
           department:      r.department,
@@ -529,6 +532,7 @@ export default function ImportPage({ user, role, isDarkMode, toggleDarkMode }) {
           status:          r.status,
           candidateName:   r.candidateName,
           startDate:       r.startDate,
+          offeringDate:    r.offeringDate    || '',  // วัน offering (ใช้ใน SLA + Sheets)
           contractEndDate: r.contractEndDate || '',
           requestType:     r.requestType,
           employmentType:  r.employmentType || 'Monthly', // default Monthly ถ้าไม่มีข้อมูล
@@ -550,6 +554,10 @@ export default function ImportPage({ user, role, isDarkMode, toggleDarkMode }) {
         await batch.commit() // commit batch ทั้ง chunk
         count += chunk.length
         setImported(count) // อัพเดต progress counter (re-render ทุก batch)
+        // หลัง commit: เก็บ row พร้อม Firestore ID (ถ้า hcId ว่าง → ใช้ doc ID แทน)
+        chunkRefs.forEach(({ r, ref }) => {
+          rowsWithIds.push({ ...r, hcId: r.hcId || ref.id })
+        })
       } catch (err) {
         errs.push(`Batch ${i / BATCH_SIZE + 1}: ${err.message}`)
       }
@@ -563,10 +571,10 @@ export default function ImportPage({ user, role, isDarkMode, toggleDarkMode }) {
     // จะ sync เฉพาะเมื่อไม่มี error และมี rows ที่ import ได้
     // syncBatchToSheets() ส่ง rows ทั้งหมดไปยัง Google Apps Script webhook
     // เพื่ออัพเดต Google Sheets tracker ให้ตรงกับ Firestore
-    if (errs.length === 0 && rows.length > 0) {
-      setImportedRows(rows) // เก็บไว้สำหรับ re-sync ภายหลัง
+    if (errs.length === 0 && rowsWithIds.length > 0) {
+      setImportedRows(rowsWithIds) // เก็บไว้สำหรับ re-sync ภายหลัง
       setSyncing(true)
-      await syncBatchToSheets(rows)
+      await syncBatchToSheets(rowsWithIds)
       setSyncing(false)
       setSyncDone(true)
     }

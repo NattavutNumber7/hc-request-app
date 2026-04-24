@@ -485,8 +485,8 @@ export default function HCRequestForm({ user, role, maintenanceMode = false }) {
       return seq
     })
 
-    // รูปแบบ REQ-2026-001, REQ-2026-412, ...
-    const padded = String(newSeq).padStart(3, '0')
+    // รูปแบบ REQ-2026-0001 ... REQ-2026-9999 (4 หลัก เพื่อรักษา lexicographic order ถึง 9999)
+    const padded = String(newSeq).padStart(4, '0')
     return `REQ-${currentYear}-${padded}`
   }
 
@@ -514,7 +514,7 @@ export default function HCRequestForm({ user, role, maintenanceMode = false }) {
         ...form,
         headcount: Number(form.headcount),   // แปลงเป็น number (input คืน string)
         requesterName: user.displayName,
-        requesterEmail: user.email,
+        requesterEmail: user.email.toLowerCase(),  // lowercase เพื่อ Firestore query ตรงกันเสมอ
         status: 'Open',                       // สถานะเริ่มต้นเสมอ
         hcId,                                 // HCID ที่ generate: REQ-YYYY-NNN
         createdAt: serverTimestamp(),          // ให้ Firestore ใส่ timestamp server

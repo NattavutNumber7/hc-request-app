@@ -342,33 +342,39 @@ export async function syncFromSheets() {
     // ── Step 2: Query Firestore หา docRef จาก hcId ───────────────────────────
     // Firestore 'in' query รองรับสูงสุด 30 items ต่อ chunk
     const hcIds  = rows.map(r => r.hcId).filter(Boolean)
-    const docMap = {}   // hcId → DocumentReference
+    const docMap = {}   // hcId → { ref, currentStatus }
 
     for (let i = 0; i < hcIds.length; i += 30) {
       const chunk = hcIds.slice(i, i + 30)
       const q     = query(collection(db, 'hc_requests'), where('hcId', 'in', chunk))
       const snap  = await getDocs(q)
-      snap.forEach(d => { docMap[d.data().hcId] = d.ref })
+      snap.forEach(d => { docMap[d.data().hcId] = { ref: d.ref, currentStatus: d.data().status } })
     }
 
     // ── Step 3: writeBatch — อัปเดตทุก doc ในครั้งเดียว ─────────────────────
     // Firestore batch รองรับสูงสุด 500 operations ต่อ batch
+    // ป้องกัน: 'Active Sourcing' ใน Sheets map เป็น 'Recruiting' ซึ่งจะ overwrite 'Interviewing'
+    // → ถ้า app status เป็น 'Interviewing' และ Sheets บอก 'Recruiting' ให้คง 'Interviewing' ไว้
+    const RECRUITING_EQUIVALENT = new Set(['Recruiting', 'Interviewing'])
     let synced = 0
     for (let i = 0; i < rows.length; i += 400) {
       const batch = writeBatch(db)
       rows.slice(i, i + 400).forEach(row => {
-        const ref = docMap[row.hcId]
-        if (!ref) return
+        const entry = docMap[row.hcId]
+        if (!entry) return
 
         const update = {}
         const appStatus = SHEETS_TO_APP[row.status]
-        if (appStatus)     update.status         = appStatus
+        // ป้องกันการ downgrade จาก Interviewing → Recruiting เพราะ Sheets ไม่มี Interviewing dropdown
+        if (appStatus && !(appStatus === 'Recruiting' && RECRUITING_EQUIVALENT.has(entry.currentStatus))) {
+          update.status = appStatus
+        }
         if (row.pic)       update.assignedToName = row.pic
         if (row.candidate) update.candidateName  = row.candidate
         if (row.startDate) update.startDate      = row.startDate
 
         if (Object.keys(update).length > 0) {
-          batch.update(ref, update)
+          batch.update(entry.ref, update)
           synced++
         }
       })

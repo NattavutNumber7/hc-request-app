@@ -65,38 +65,46 @@ function onSheetEdit(e) {
     // ทำงานเฉพาะ sheet ชื่อ "Job Openings YYYY"
     if (!sheet.getName().startsWith('Job Openings')) return
 
-    var col = e.range.getColumn()
-    var row = e.range.getRow()
-    if (row <= 1) return // ข้าม header row
+    var range    = e.range
+    var startCol = range.getColumn()
+    var startRow = range.getRow()
+    var numRows  = range.getNumRows()
+    var numCols  = range.getNumColumns()
 
-    // ตรวจเฉพาะ column PIC (I) และ Status (J)
-    if (col !== COL_PIC && col !== COL_STATUS) return
+    // ตรวจว่า range ครอบคลุม COL_PIC หรือ COL_STATUS มั้ย
+    var hasPic    = startCol <= COL_PIC    && (startCol + numCols - 1) >= COL_PIC
+    var hasStatus = startCol <= COL_STATUS && (startCol + numCols - 1) >= COL_STATUS
+    if (!hasPic && !hasStatus) return
 
-    var hcId = sheet.getRange(row, COL_HCID).getValue()
-    if (!hcId) return
+    var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
 
-    // อ่านค่าทั้งหมดที่ sync ได้
-    var status        = sheet.getRange(row, COL_STATUS).getValue()
-    var pic           = sheet.getRange(row, COL_PIC).getValue()
+    // วน process ทุก row ใน range (รองรับ multi-cell paste)
+    for (var ri = 0; ri < numRows; ri++) {
+      var row = startRow + ri
+      if (row <= 1) continue // ข้าม header row
 
-    var candidateName = sheet.getRange(row, COL_CANDIDATE).getValue()
-    var startDate     = sheet.getRange(row, COL_START_DATE).getValue()
+      var hcId = sheet.getRange(row, COL_HCID).getValue()
+      if (!hcId) continue
 
-    // แปลง startDate เป็น string ถ้าเป็น Date object
-    if (startDate instanceof Date && !isNaN(startDate)) {
-      var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
-      startDate = startDate.getDate() + '-' + months[startDate.getMonth()] + '-' + startDate.getFullYear()
+      var status        = sheet.getRange(row, COL_STATUS).getValue()
+      var pic           = sheet.getRange(row, COL_PIC).getValue()
+      var candidateName = sheet.getRange(row, COL_CANDIDATE).getValue()
+      var startDate     = sheet.getRange(row, COL_START_DATE).getValue()
+
+      // แปลง startDate เป็น string ถ้าเป็น Date object
+      if (startDate instanceof Date && !isNaN(startDate)) {
+        startDate = startDate.getDate() + '-' + months[startDate.getMonth()] + '-' + startDate.getFullYear()
+      }
+
+      // อัพเดต Firestore
+      var result = updateFirestoreByHcId_(hcId, {
+        status:         status        || null,
+        assignedToName: pic           || null,
+        candidateName:  candidateName || null,
+        startDate:      startDate     || null,
+      })
+      Logger.log('[onSheetEdit] row=' + row + ' hcId=' + hcId + ' → ' + JSON.stringify(result))
     }
-
-    // อัพเดต Firestore
-    var result = updateFirestoreByHcId_(hcId, {
-      status:           status           || null,
-      assignedToName:   pic              || null,
-      candidateName:    candidateName    || null,
-      startDate:        startDate        || null,
-    })
-
-    Logger.log('[onSheetEdit] hcId=' + hcId + ' → ' + JSON.stringify(result))
   } catch (err) {
     Logger.log('[onSheetEdit] ERROR: ' + err.message)
   }
@@ -155,10 +163,21 @@ function updateFirestoreByHcId_(hcId, data) {
   var fields = {}
   var updateMask = []
 
+  // แปลง Sheets display status → app internal status ก่อนเช็ค VALID_STATUSES
+  // (เมื่อ TA แก้ใน Sheets ค่าจะเป็น display name เช่น 'Active Sourcing', 'To be confirmed')
+  var SHEETS_TO_APP_STATUS = {
+    'To be confirmed':  'Open',        'Open':             'Open',
+    'Active Sourcing':  'Recruiting',  'Pending Offer':    'Offering',
+    'Pending Onboard':  'Onboarding',  'Onboard':          'Closed',
+    'Job Cancelled':    'Cancelled',   'Turndown':         'Rejected',
+    'On hold':          'Open',        'Internal Transfer':'Closed',
+    'Confidential':     'Recruiting',  'Interviewing':     'Interviewing',
+  }
   var VALID_STATUSES = ['Open','Recruiting','Interviewing','Offering','Onboarding','Rejected','Closed','Cancelled']
+  var appStatus = data.status ? (SHEETS_TO_APP_STATUS[data.status] || data.status) : null
 
-  if (data.status && VALID_STATUSES.includes(data.status)) {
-    fields['status'] = { stringValue: data.status }
+  if (appStatus && VALID_STATUSES.includes(appStatus)) {
+    fields['status'] = { stringValue: appStatus }
     updateMask.push('status')
   }
   if (data.assignedToName) {
@@ -282,6 +301,7 @@ function doGet(e) {
 
   // ── DEBUG ──────────────────────────────────────────────────────────────────
   if (e.parameter.action === 'debug') {
+    if (!isValidSecret_(e)) return responseJson_({ error: 'Unauthorized' })
     var info = { ssId: null, ssName: null, sheets: [], jobSheetFound: false, jobSheetRows: 0 }
     if (ss) {
       info.ssId   = ss.getId()
@@ -298,6 +318,7 @@ function doGet(e) {
   // ── DEBUG HR: เช็คการเข้าถึง HR Spreadsheet ──────────────────────────────
   // เรียกด้วย ?action=debugHR
   if (e.parameter.action === 'debugHR') {
+    if (!isValidSecret_(e)) return responseJson_({ error: 'Unauthorized' })
     try {
       var hrSsTest = getHrSpreadsheet_()
       var hrSheets = hrSsTest.getSheets().map(function(s) { return s.getName() })
@@ -486,6 +507,13 @@ function doGet(e) {
     if (!isValidSecret_(e)) return responseJson_({ error: 'Unauthorized' })
     var fetchUrl = e.parameter.url
     if (!fetchUrl) return responseJson_({ error: 'Missing url parameter' })
+    // ── SSRF protection: ป้องกัน GCP metadata และ private IP ────────────────
+    if (!/^https?:\/\//i.test(fetchUrl)) return responseJson_({ error: 'URL ต้องเป็น HTTP หรือ HTTPS เท่านั้น' })
+    var urlLower = fetchUrl.toLowerCase()
+    var ssrfBlocked = ['metadata.google.internal','169.254.','192.168.','10.0.','127.0.0.1','localhost','0.0.0.0','::1','file://']
+    for (var bi = 0; bi < ssrfBlocked.length; bi++) {
+      if (urlLower.indexOf(ssrfBlocked[bi]) !== -1) return responseJson_({ error: 'URL ไม่ได้รับอนุญาต' })
+    }
     try {
       var fetchResp = UrlFetchApp.fetch(fetchUrl, {
         muteHttpExceptions: true,

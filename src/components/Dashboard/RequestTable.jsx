@@ -460,9 +460,11 @@ export default function RequestTable({
         rejectReason: rejectReason.trim() || 'ไม่ระบุเหตุผล',
         rejectedAt: serverTimestamp(),
         startDate: '',
+        candidateName: '',   // ล้างชื่อ candidate เมื่อ Reject
         statusHistory: arrayUnion(buildHistoryEntry('Rejected', user)),
       })
-      sendStatusUpdate(rejectModal.id, 'Rejected', req?.assignedToName, null, null, null, req?.hcId)
+      // clearInfo=true → GAS จะล้าง candidateName + startDate ใน Sheets ด้วย
+      sendStatusUpdate(rejectModal.id, 'Rejected', req?.assignedToName, null, null, null, req?.hcId, null, true)
       logAudit({
         requestId: rejectModal.id,
         action: 'Rejected',
@@ -521,8 +523,16 @@ export default function RequestTable({
   async function handleReopen(id) {
     const req = requests.find((r) => r.id === id)
     try {
-      await updateDoc(doc(db, 'hc_requests', id), { status: 'Recruiting', startDate: '', rejectedAt: null, statusHistory: arrayUnion(buildHistoryEntry('Recruiting', user)) })
-      sendStatusUpdate(id, 'Recruiting', req.assignedToName, null, null, null, req?.hcId)
+      await updateDoc(doc(db, 'hc_requests', id), {
+        status: 'Recruiting',
+        startDate: '',
+        candidateName: '',   // ล้างชื่อ candidate เมื่อ Reopen
+        offeringDate: '',    // ล้างวัน offering เมื่อ Reopen
+        rejectedAt: null,
+        statusHistory: arrayUnion(buildHistoryEntry('Recruiting', user)),
+      })
+      // clearInfo=true → GAS จะล้าง candidateName + startDate ใน Sheets ด้วย
+      sendStatusUpdate(id, 'Recruiting', req.assignedToName, null, null, null, req?.hcId, 'CLEAR', true)
       logAudit({
         requestId: id,
         action: 'Reopen',
@@ -579,10 +589,15 @@ export default function RequestTable({
         await deleteJDFile(req.jdFilePath)
       }
 
-      // 2. ลบ Document ใน Firestore
+      // 2. ลบไฟล์ CV ทั้งหมดใน Supabase cv-files bucket (ป้องกัน orphaned files)
+      if (req?.cvFiles?.length > 0) {
+        await Promise.all(req.cvFiles.map((cv) => deleteCVFile(cv.path).catch(() => {})))
+      }
+
+      // 3. ลบ Document ใน Firestore
       await deleteDoc(doc(db, 'hc_requests', id))
 
-      // 3. แจ้ง GAS ให้ลบ row ใน Google Sheets (ถ้ามี hcId)
+      // 4. แจ้ง GAS ให้ลบ row ใน Google Sheets (ถ้ามี hcId)
       if (req?.hcId) sendDeleteToSheets(req.hcId)
 
       logAudit({
