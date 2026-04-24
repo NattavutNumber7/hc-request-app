@@ -964,7 +964,17 @@ function syncBatchHandler_(ss, rows) {
     var ctx = sheetCache[sheetName]
     if (!ctx.newRows || ctx.newRows.length === 0) return
 
-    var startRow = ctx.sheet.getLastRow() + 1
+    // หา last row ที่มีค่าใน HCID column (col D) จริงๆ
+    // ป้องกัน getLastRow() คืนค่าสูงเกินจริงเพราะ row เก่าที่เหลือจาก sync ก่อนหน้า
+    var totalRows = ctx.sheet.getLastRow()
+    var lastDataRow = 1
+    if (totalRows > 1) {
+      var hcidVals = ctx.sheet.getRange(2, HCID_COL, totalRows - 1, 1).getValues()
+      for (var ri = hcidVals.length - 1; ri >= 0; ri--) {
+        if (hcidVals[ri][0]) { lastDataRow = ri + 2; break }
+      }
+    }
+    var startRow = lastDataRow + 1
     var allRowData = ctx.newRows.map(function(nr) { return nr.rowData })
 
     // ขยาย column ถ้า sheet มีน้อยกว่า HEADERS.length
