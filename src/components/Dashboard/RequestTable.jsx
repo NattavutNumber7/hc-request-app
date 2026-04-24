@@ -241,11 +241,16 @@ export default function RequestTable({
   const [reassigningId, setReassigningId] = useState(null)
   const [search, setSearch] = useState('')
   const [activeTab, setActiveTab] = useState('ทั้งหมด')
-  const [filterDept, setFilterDept] = useState('')
+  const [filterEmpType,  setFilterEmpType]  = useState('')
+  const [filterJobType,  setFilterJobType]  = useState('')
+  const [filterRank,     setFilterRank]     = useState('')
+  const [filterDept,     setFilterDept]     = useState('')
+  const [filterBU,       setFilterBU]       = useState('')
   const [filterAssigned, setFilterAssigned] = useState('')
   const [filterDateFrom, setFilterDateFrom] = useState('')
-  const [filterDateTo, setFilterDateTo] = useState('')
-  const [showFilterBar, setShowFilterBar] = useState(false)
+  const [filterDateTo,   setFilterDateTo]   = useState('')
+  const [showFilterBar,  setShowFilterBar]  = useState(false)
+  const [openChip,       setOpenChip]       = useState(null)
   const [sortField, setSortField] = useState('createdAt')
   const [sortDir, setSortDir] = useState('desc')
   const [confirmState, setConfirmState] = useState({ isOpen: false, action: null, payload: null })
@@ -690,8 +695,10 @@ export default function RequestTable({
     else { setSortField(field); setSortDir('desc') }
   }, [sortField])
 
-  const departments = useMemo(() => [...new Set(requests.map((r) => r.department).filter(Boolean))].sort(), [requests])
-  const assignees = useMemo(() => [...new Set(requests.map((r) => r.assignedToName).filter(Boolean))].sort(), [requests])
+  const departments   = useMemo(() => [...new Set(requests.map((r) => r.department).filter(Boolean))].sort(), [requests])
+  const assignees     = useMemo(() => [...new Set(requests.map((r) => r.assignedToName).filter(Boolean))].sort(), [requests])
+  const businessUnits = useMemo(() => [...new Set(requests.map((r) => r.businessUnit).filter(Boolean))].sort(), [requests])
+  const ranks         = useMemo(() => [...new Set(requests.map((r) => r.jg).filter(Boolean))].sort(), [requests])
 
   // ─── คำนวณจำนวนรายการในแต่ละ Tab (นับตาม visibility rule เดียวกับ displayed) ───
   const tabCounts = useMemo(() => {
@@ -738,7 +745,11 @@ export default function RequestTable({
         : list.filter((r) => getAssignedEmail(r, allTAs) === user.email?.toLowerCase() || (r.assignedToName && r.assignedToName === user.displayName))
     }
     if (activeTab !== 'ทั้งหมด') list = list.filter((r) => r.status === activeTab)
-    if (filterDept) list = list.filter((r) => r.department === filterDept)
+    if (filterEmpType)  list = list.filter((r) => r.employmentType === filterEmpType)
+    if (filterJobType)  list = list.filter((r) => r.requestType === filterJobType)
+    if (filterRank)     list = list.filter((r) => r.jg === filterRank)
+    if (filterDept)     list = list.filter((r) => r.department === filterDept)
+    if (filterBU)       list = list.filter((r) => r.businessUnit === filterBU)
     if (filterAssigned) list = list.filter((r) => r.assignedToName === filterAssigned)
     if (filterDateFrom) list = list.filter((r) => r.createdAt?.toDate?.() >= new Date(filterDateFrom))
     if (filterDateTo) { const to = new Date(filterDateTo); to.setHours(23, 59, 59); list = list.filter((r) => r.createdAt?.toDate?.() <= to) }
@@ -767,14 +778,23 @@ export default function RequestTable({
       return 0
     })
     return list
-  }, [requests, filterMine, filterMyCases, activeTab, filterDept, filterAssigned, filterDateFrom, filterDateTo, search, sortField, sortDir, user.email, user.displayName, role, department, allTAs])
+  }, [requests, filterMine, filterMyCases, activeTab, filterEmpType, filterJobType, filterRank, filterDept, filterBU, filterAssigned, filterDateFrom, filterDateTo, search, sortField, sortDir, user.email, user.displayName, role, department, allTAs])
 
-  const hasAdvancedFilters = filterDept || filterAssigned || filterDateFrom || filterDateTo
+  const hasChipFilters     = filterEmpType || filterJobType || filterRank || filterDept || filterBU || filterAssigned
+  const hasAdvancedFilters = hasChipFilters || filterDateFrom || filterDateTo
 
-  function clearAdvanced() { setFilterDept(''); setFilterAssigned(''); setFilterDateFrom(''); setFilterDateTo('') }
+  function clearChips()    { setFilterEmpType(''); setFilterJobType(''); setFilterRank(''); setFilterDept(''); setFilterBU(''); setFilterAssigned('') }
+  function clearAdvanced() { clearChips(); setFilterDateFrom(''); setFilterDateTo('') }
 
-  // reset page เมื่อ filter หรือ tab เปลี่ยน
-  useEffect(() => { setPage(1) }, [activeTab, filterDept, filterAssigned, filterDateFrom, filterDateTo, search, filterMine, filterMyCases])
+  useEffect(() => { setPage(1) }, [activeTab, filterEmpType, filterJobType, filterRank, filterDept, filterBU, filterAssigned, filterDateFrom, filterDateTo, search, filterMine, filterMyCases])
+
+  // ปิด chip dropdown เมื่อคลิกนอก
+  useEffect(() => {
+    if (!openChip) return
+    const close = () => setOpenChip(null)
+    document.addEventListener('mousedown', close)
+    return () => document.removeEventListener('mousedown', close)
+  }, [openChip])
 
   const totalPages = Math.ceil(displayed.length / PAGE_SIZE)
   const paged = displayed.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
@@ -861,33 +881,61 @@ export default function RequestTable({
         })}
       </div>
 
-      {/* Advanced Filter Bar */}
-      {showFilters && showFilterBar && (
-        <div className="rounded-2xl border border-gray-200 dark:border-slate-800 p-4 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 bg-gray-50/50 dark:bg-slate-900/50 backdrop-blur-sm transition-all shadow-inner">
-          <div className="flex flex-col gap-1.5">
-            <label className="text-[10px] uppercase font-bold text-gray-500 dark:text-slate-500 tracking-wider">Department</label>
-            <select id="filter-dept" name="filter-dept" value={filterDept} onChange={(e) => setFilterDept(e.target.value)} className="text-sm border border-gray-200 dark:border-slate-800 rounded-xl px-3 py-2 bg-white dark:bg-slate-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-[#00ce7c]/30">
-              <option value="">ทั้งหมด</option>
-              {departments.map((d) => <option key={d} value={d}>{d}</option>)}
-            </select>
+      {/* Chip Filters */}
+      {showFilters && (() => {
+        function ChipSelect({ id, label, value, onChange, options }) {
+          return (
+            <div className="relative" onMouseDown={e => e.stopPropagation()}>
+              <button
+                onClick={() => setOpenChip(openChip === id ? null : id)}
+                className={`flex items-center gap-1 px-3 py-1.5 rounded-full text-[11px] font-semibold border transition-all whitespace-nowrap select-none
+                  ${value
+                    ? 'bg-emerald-50 dark:bg-emerald-500/15 border-emerald-300 dark:border-emerald-500/40 text-emerald-700 dark:text-emerald-300'
+                    : 'bg-white dark:bg-slate-800 border-gray-200 dark:border-slate-700 text-gray-500 dark:text-slate-400 hover:border-emerald-300 dark:hover:border-emerald-500/40 hover:text-emerald-600'}`}
+              >
+                <span>{value || label}</span>
+                {value
+                  ? <X size={10} className="cursor-pointer" onClick={e => { e.stopPropagation(); onChange(''); setOpenChip(null) }} />
+                  : <ChevronDown size={10} />}
+              </button>
+              {openChip === id && (
+                <div className="absolute top-full mt-1.5 z-40 bg-white dark:bg-slate-800 border border-gray-200 dark:border-slate-700 rounded-xl shadow-lg min-w-40 py-1 max-h-56 overflow-y-auto">
+                  {options.map(opt => (
+                    <button key={opt} onMouseDown={() => { onChange(opt); setOpenChip(null) }}
+                      className={`w-full text-left px-3 py-1.5 text-xs transition-colors
+                        ${value === opt
+                          ? 'text-emerald-600 dark:text-emerald-400 font-semibold bg-emerald-50 dark:bg-emerald-500/10'
+                          : 'text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-slate-700'}`}>
+                      {opt}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )
+        }
+        return (
+          <div className="flex flex-wrap gap-2 items-center">
+            <ChipSelect id="empType"  label="Emp. Type"      value={filterEmpType}  onChange={setFilterEmpType}  options={['Monthly','Daily','Contract','Intern']} />
+            <ChipSelect id="jobType"  label="Job Type"       value={filterJobType}  onChange={setFilterJobType}  options={['New HC','Replace']} />
+            <ChipSelect id="rank"     label="Rank"           value={filterRank}     onChange={setFilterRank}     options={ranks} />
+            <ChipSelect id="dept"     label="Department"     value={filterDept}     onChange={setFilterDept}     options={departments} />
+            <ChipSelect id="bu"       label="Business Unit"  value={filterBU}       onChange={setFilterBU}       options={businessUnits} />
+            <ChipSelect id="ta"       label="PIC / TA"       value={filterAssigned} onChange={setFilterAssigned} options={assignees} />
+            <div className="w-px h-4 bg-gray-200 dark:bg-slate-700 mx-1" />
+            <input type="date" value={filterDateFrom} onChange={e => setFilterDateFrom(e.target.value)} title="วันที่ตั้งแต่"
+              className="text-[11px] border border-gray-200 dark:border-slate-700 rounded-full px-3 py-1.5 bg-white dark:bg-slate-800 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-emerald-300/40" />
+            <span className="text-gray-400 text-xs">–</span>
+            <input type="date" value={filterDateTo} onChange={e => setFilterDateTo(e.target.value)} title="ถึงวันที่"
+              className="text-[11px] border border-gray-200 dark:border-slate-700 rounded-full px-3 py-1.5 bg-white dark:bg-slate-800 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-emerald-300/40" />
+            {hasAdvancedFilters && (
+              <button onClick={clearAdvanced} className="text-[11px] text-gray-400 hover:text-red-500 dark:hover:text-red-400 flex items-center gap-1 transition-colors">
+                <X size={11} /> ล้างทั้งหมด
+              </button>
+            )}
           </div>
-          <div className="flex flex-col gap-1.5">
-            <label className="text-[10px] uppercase font-bold text-gray-500 dark:text-slate-500 tracking-wider">Assigned To</label>
-            <select id="filter-assigned" name="filter-assigned" value={filterAssigned} onChange={(e) => setFilterAssigned(e.target.value)} className="text-sm border border-gray-200 dark:border-slate-800 rounded-xl px-3 py-2 bg-white dark:bg-slate-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-[#00ce7c]/30">
-              <option value="">ทั้งหมด</option>
-              {assignees.map((a) => <option key={a} value={a}>{a}</option>)}
-            </select>
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <label className="text-[10px] uppercase font-bold text-gray-500 dark:text-slate-500 tracking-wider">วันที่ตั้งแต่</label>
-            <input id="filter-date-from" name="filter-date-from" type="date" value={filterDateFrom} onChange={(e) => setFilterDateFrom(e.target.value)} className="text-sm border border-gray-200 dark:border-slate-800 rounded-xl px-3 py-2 bg-white dark:bg-slate-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-[#00ce7c]/30" />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <label className="text-[10px] uppercase font-bold text-gray-500 dark:text-slate-500 tracking-wider">ถึงวันที่</label>
-            <input id="filter-date-to" name="filter-date-to" type="date" value={filterDateTo} onChange={(e) => setFilterDateTo(e.target.value)} className="text-sm border border-gray-200 dark:border-slate-800 rounded-xl px-3 py-2 bg-white dark:bg-slate-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-[#00ce7c]/30" />
-          </div>
-        </div>
-      )}
+        )
+      })()}
 
       {/* Table */}
       {displayed.length === 0 ? (
