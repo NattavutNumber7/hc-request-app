@@ -625,29 +625,41 @@ function doGet(e) {
       var gdLastRow = gdSheet.getLastRow()
       if (gdLastRow < 2) return responseJson_({ success: true, rows: [] })
 
-      var gdCols   = Math.max(COL_STATUS, COL_PIC, COL_CANDIDATE, COL_START_DATE)
+      var COL_CONTRACT_END = 17  // Q: Contract End Date
+      var gdCols   = Math.max(COL_STATUS, COL_PIC, COL_CANDIDATE, COL_START_DATE, COL_CONTRACT_END)
       var gdData   = gdSheet.getRange(2, 1, gdLastRow - 1, gdCols).getValues()
       var gdMonths = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+
+      function fmtDateCell_(raw) {
+        if (!raw) return ''
+        if (raw instanceof Date && !isNaN(raw)) return raw.getDate() + '-' + gdMonths[raw.getMonth()] + '-' + raw.getFullYear()
+        return raw.toString().trim()
+      }
 
       var gdRows = []
       gdData.forEach(function(row) {
         var hcId = (row[COL_HCID - 1] || '').toString().trim()
         if (!hcId) return
 
-        var startRaw = row[COL_START_DATE - 1]
-        var startStr = ''
-        if (startRaw instanceof Date && !isNaN(startRaw)) {
-          startStr = startRaw.getDate() + '-' + gdMonths[startRaw.getMonth()] + '-' + startRaw.getFullYear()
-        } else if (startRaw) {
-          startStr = startRaw.toString().trim()
-        }
+        // แยก JG code จาก rank label เช่น "JG5 — Senior Officer / Executive" → "JG5"
+        var rankRaw = (row[COL_RANK - 1] || '').toString().trim()
+        var jgCode  = rankRaw ? rankRaw.split(/\s|—/)[0].trim() : ''
 
         gdRows.push({
-          hcId:      hcId,
-          status:    (row[COL_STATUS    - 1] || '').toString().trim(),
-          pic:       (row[COL_PIC       - 1] || '').toString().trim(),
-          candidate: (row[COL_CANDIDATE - 1] || '').toString().trim(),
-          startDate: startStr,
+          hcId:           hcId,
+          openDate:       fmtDateCell_(row[COL_OPEN_JOBS  - 1]),
+          employmentType: (row[COL_EMP_TYPE  - 1] || '').toString().trim(),
+          requestType:    (row[COL_JOB_TYPE  - 1] || '').toString().trim(),
+          position:       (row[COL_POSITION  - 1] || '').toString().trim(),
+          jg:             jgCode,
+          department:     (row[COL_DEPT      - 1] || '').toString().trim(),
+          businessUnit:   (row[COL_BU        - 1] || '').toString().trim(),
+          pic:            (row[COL_PIC       - 1] || '').toString().trim(),
+          status:         (row[COL_STATUS    - 1] || '').toString().trim(),
+          candidate:      (row[COL_CANDIDATE - 1] || '').toString().trim(),
+          offeringDate:   fmtDateCell_(row[COL_OFFER_DATE - 1]),
+          startDate:      fmtDateCell_(row[COL_START_DATE - 1]),
+          contractEndDate:fmtDateCell_(row[COL_CONTRACT_END - 1]),
         })
       })
 

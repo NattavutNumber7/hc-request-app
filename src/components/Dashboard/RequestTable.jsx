@@ -905,11 +905,11 @@ export default function RequestTable({
             <thead>
               <tr className="bg-gray-50/80 dark:bg-slate-800/50 backdrop-blur-sm">
                 {[
-                  { label: 'ID', field: null },
-                  { label: 'ประเภท', field: null },
+                  { label: 'ID', field: 'hcId' },
+                  { label: 'ประเภท', field: 'requestType' },
                   { label: 'ตำแหน่ง / JG', field: 'position' },
                   { label: 'แผนก', field: 'department' },
-                  { label: 'ผู้ยื่น', field: null },
+                  { label: 'ผู้ยื่น', field: 'requesterName' },
                   { label: 'TA', field: 'assignedToName' },
                   { label: 'สถานะ', field: 'status' },
                   { label: 'วันที่ยื่น', field: 'createdAt' },

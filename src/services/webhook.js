@@ -351,37 +351,62 @@ export async function syncFromSheets() {
       snap.forEach(d => { docMap[d.data().hcId] = { ref: d.ref, currentStatus: d.data().status } })
     }
 
-    // ── Step 3: writeBatch — อัปเดตทุก doc ในครั้งเดียว ─────────────────────
-    // Firestore batch รองรับสูงสุด 500 operations ต่อ batch
-    // ป้องกัน: 'Active Sourcing' ใน Sheets map เป็น 'Recruiting' ซึ่งจะ overwrite 'Interviewing'
-    // → ถ้า app status เป็น 'Interviewing' และ Sheets บอก 'Recruiting' ให้คง 'Interviewing' ไว้
+    // ── Step 3: writeBatch — อัปเดต/สร้าง docs ────────────────────────────────
+    const { doc: fsDoc, serverTimestamp } = await import('firebase/firestore')
     const RECRUITING_EQUIVALENT = new Set(['Recruiting', 'Interviewing'])
     let synced = 0
+    let created = 0
+
     for (let i = 0; i < rows.length; i += 400) {
       const batch = writeBatch(db)
       rows.slice(i, i + 400).forEach(row => {
-        const entry = docMap[row.hcId]
-        if (!entry) return
+        const entry    = docMap[row.hcId]
+        const appStatus = SHEETS_TO_APP[row.status] || 'Open'
 
-        const update = {}
-        const appStatus = SHEETS_TO_APP[row.status]
-        // ป้องกันการ downgrade จาก Interviewing → Recruiting เพราะ Sheets ไม่มี Interviewing dropdown
-        if (appStatus && !(appStatus === 'Recruiting' && RECRUITING_EQUIVALENT.has(entry.currentStatus))) {
-          update.status = appStatus
-        }
-        if (row.pic)       update.assignedToName = row.pic
-        if (row.candidate) update.candidateName  = row.candidate
-        if (row.startDate) update.startDate      = row.startDate
-
-        if (Object.keys(update).length > 0) {
-          batch.update(entry.ref, update)
-          synced++
+        if (entry) {
+          // ── UPDATE: doc มีอยู่แล้วใน Firestore ──────────────────────────
+          const update = {}
+          if (appStatus && !(appStatus === 'Recruiting' && RECRUITING_EQUIVALENT.has(entry.currentStatus))) {
+            update.status = appStatus
+          }
+          if (row.pic)            update.assignedToName  = row.pic
+          if (row.candidate)      update.candidateName   = row.candidate
+          if (row.startDate)      update.startDate       = row.startDate
+          if (row.offeringDate)   update.offeringDate    = row.offeringDate
+          if (row.contractEndDate)update.contractEndDate = row.contractEndDate
+          if (Object.keys(update).length > 0) { batch.update(entry.ref, update); synced++ }
+        } else if (row.hcId && row.position) {
+          // ── CREATE: row ใหม่ที่ TA เพิ่มใน Sheets แต่ยังไม่มีใน Firestore ─
+          const newRef = fsDoc(collection(db, 'hc_requests'))
+          batch.set(newRef, {
+            hcId:           row.hcId,
+            position:       row.position       || '',
+            department:     row.department     || '',
+            businessUnit:   row.businessUnit   || '',
+            jg:             row.jg             || '',
+            requestType:    row.requestType    || 'New HC',
+            employmentType: row.employmentType || 'Monthly',
+            assignedToName: row.pic            || '',
+            status:         appStatus,
+            candidateName:  row.candidate      || '',
+            startDate:      row.startDate      || '',
+            offeringDate:   row.offeringDate   || '',
+            contractEndDate:row.contractEndDate|| '',
+            headcount:      1,
+            reason:         'นำเข้าจาก Google Sheets',
+            requesterName:  'Sheets Import',
+            requesterEmail: '',
+            createdAt:      row.openDate ? new Date(row.openDate) : serverTimestamp(),
+            importedAt:     serverTimestamp(),
+            importedBy:     'sheets-sync',
+          })
+          created++
         }
       })
       await batch.commit()
     }
 
-    return { success: true, synced, total: rows.length }
+    return { success: true, synced, created, total: rows.length }
   } catch (err) {
     console.error('[syncFromSheets] error:', err)
     return { success: false, error: err.message }

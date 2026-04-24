@@ -35,7 +35,7 @@ export default function AllRequestsPage({ user, role, department, isDarkMode, to
     try {
       const res = await syncFromSheets()
       if (res.success) {
-        setSyncResult(`Synced ${res.synced} / ${res.total} rows`)
+        setSyncResult(`Updated ${res.synced}${res.created ? ` · Added ${res.created} new` : ''} / ${res.total} rows`)
         setSyncState('done')
       } else {
         setSyncResult(res.error || 'Sync failed')
